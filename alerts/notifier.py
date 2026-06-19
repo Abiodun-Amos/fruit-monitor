@@ -1,0 +1,161 @@
+"""
+alerts/notifier.py
+Outbound alert dispatcher — Telegram and Gmail SMTP.
+
+Both channels are optional. If credentials are missing for a channel
+it is silently skipped; the other channel still fires.
+
+Usage:
+    notifier = AlertNotifier(settings)
+    await notifier.send(message, alert_level, fruit_name, days_remaining)
+"""
+import asyncio
+import logging
+import smtplib
+import ssl
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+logger = logging.getLogger(__name__)
+
+# Alert level → colour used in the HTML email
+_LEVEL_COLOUR = {
+    "warning":  "#f59e0b",   # amber
+    "critical": "#ef4444",   # red
+    "spoiled":  "#7c3aed",   # purple
+}
+_LEVEL_ICON = {
+    "warning":  "⚠️",
+    "critical": "🚨",
+    "spoiled":  "❌",
+}
+
+
+class AlertNotifier:
+
+    def __init__(self, settings):
+        self._s            = settings
+        self._telegram_bot = None
+        self._init_telegram()
+
+    # ── Setup ─────────────────────────────────────────────────
+
+    def _init_telegram(self):
+        if self._s.TELEGRAM_BOT_TOKEN and self._s.TELEGRAM_CHAT_ID:
+            try:
+                from telegram import Bot
+                self._telegram_bot = Bot(token=self._s.TELEGRAM_BOT_TOKEN)
+                logger.info("Telegram alerts enabled")
+            except Exception as exc:
+                logger.warning("Telegram init failed (will skip): %s", exc)
+
+    # ── Public entry point ────────────────────────────────────
+
+    async def send(
+        self,
+        message:        str,
+        alert_level:    str,
+        fruit_name:     str   = "",
+        days_remaining: float = 0.0,
+    ):
+        """
+        Fire alerts on all configured channels simultaneously.
+        Exceptions in one channel do not affect the other.
+        """
+        await asyncio.gather(
+            self._telegram(message, alert_level),
+            self._email(message, alert_level, fruit_name, days_remaining),
+            return_exceptions=True,
+        )
+
+    # ── Telegram ──────────────────────────────────────────────
+
+    async def _telegram(self, message: str, alert_level: str):
+        if not self._telegram_bot:
+            return
+        icon = _LEVEL_ICON.get(alert_level, "⚠️")
+        text = (
+            f"{icon} *Fruit Monitor Alert*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"{message}"
+        )
+        try:
+            await self._telegram_bot.send_message(
+                chat_id    = self._s.TELEGRAM_CHAT_ID,
+                text       = text,
+                parse_mode = "Markdown",
+            )
+            logger.info("Telegram alert sent (%s)", alert_level)
+        except Exception as exc:
+            logger.error("Telegram send failed: %s", exc)
+
+    # ── Email ─────────────────────────────────────────────────
+
+    async def _email(
+        self,
+        message:        str,
+        alert_level:    str,
+        fruit_name:     str,
+        days_remaining: float,
+    ):
+        if not (self._s.EMAIL_FROM and self._s.EMAIL_TO and self._s.EMAIL_APP_PASSWORD):
+            return
+
+        icon    = _LEVEL_ICON.get(alert_level, "⚠️")
+        colour  = _LEVEL_COLOUR.get(alert_level, "#f59e0b")
+        subject = (
+            f"{icon} {fruit_name} Alert — {alert_level.capitalize()}"
+            if fruit_name else
+            f"{icon} Fruit Monitor Alert — {alert_level.capitalize()}"
+        )
+
+        days_line = (
+            f"<p style='margin:8px 0;color:#374151;'>"
+            f"⏱ Days remaining: <strong>{days_remaining:.1f} days</strong></p>"
+            if days_remaining > 0 else ""
+        )
+
+        html = f"""
+        <html><body style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
+          <div style="background:{colour};padding:20px 24px;border-radius:8px 8px 0 0;">
+            <h2 style="color:#fff;margin:0;">{icon} Fruit Monitor Alert</h2>
+            <p style="color:#fff;opacity:.9;margin:4px 0 0;">{alert_level.upper()}</p>
+          </div>
+          <div style="background:#f9fafb;padding:20px 24px;border:1px solid #e5e7eb;
+                      border-top:none;border-radius:0 0 8px 8px;">
+            <p style="font-size:15px;color:#111827;margin:0 0 12px;">{message}</p>
+            {days_line}
+            <hr style="border:none;border-top:1px solid #e5e7eb;margin:16px 0;">
+            <p style="font-size:11px;color:#9ca3af;margin:0;">
+              Sent by Fruit Monitor IoT System
+            </p>
+          </div>
+        </body></html>
+        """
+
+        try:
+            # SMTP is blocking — run it off the event loop
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                self._send_smtp,
+                subject, html, message,
+            )
+            logger.info("Email alert sent → %s (%s)", self._s.EMAIL_TO, alert_level)
+        except Exception as exc:
+            logger.error("Email send failed: %s", exc)
+
+    def _send_smtp(self, subject: str, html: str, plain: str):
+        """Blocking Gmail SMTP send — port 465 SSL."""
+        msg            = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"]    = self._s.EMAIL_FROM
+        msg["To"]      = self._s.EMAIL_TO
+
+        msg.attach(MIMEText(plain, "plain"))
+        msg.attach(MIMEText(html,  "html"))
+
+        ctx = ssl.create_default_context()
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx) as server:
+            server.login(self._s.EMAIL_FROM, self._s.EMAIL_APP_PASSWORD)
+            server.sendmail(self._s.EMAIL_FROM, self._s.EMAIL_TO, msg.as_string())

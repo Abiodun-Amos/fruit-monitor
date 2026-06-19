@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fruit Monitor — Live Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --bg:            #f1f5f9;
+            --surface:       #ffffff;
+            --header:        #0f172a;
+            --text:          #1e293b;
+            --muted:         #64748b;
+            --border:        #e2e8f0;
+            --ok:            #10b981;
+            --ok-bg:         #d1fae5;
+            --warning:       #f59e0b;
+            --warning-bg:    #fef3c7;
+            --critical:      #ef4444;
+            --critical-bg:   #fee2e2;
+            --spoiled:       #8b5cf6;
+            --spoiled-bg:    #ede9fe;
+            --radius:        12px;
+            --shadow:        0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.05);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+
+        /* ── Header ── */
+        header {
+            background: var(--header);
+            color: #fff;
+            padding: 14px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .header-left h1  { font-size: 18px; font-weight: 700; }
+        .header-left p   { font-size: 11px; color: #94a3b8; margin-top: 2px; }
+        .header-right    { display: flex; align-items: center; gap: 20px; font-size: 12px; color: #94a3b8; }
+
+        .live-dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: var(--ok); display: inline-block;
+            margin-right: 5px; animation: blink 2s infinite;
+        }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+        /* ── Layout ── */
+        main { padding: 20px 24px; max-width: 1440px; margin: 0 auto; }
+
+        /* ── Stat cards ── */
+        .stats { display: grid; grid-template-columns: repeat(4,1fr); gap: 16px; margin-bottom: 20px; }
+
+        .stat-card {
+            background: var(--surface); border-radius: var(--radius);
+            padding: 18px 20px; box-shadow: var(--shadow);
+            border-left: 4px solid transparent;
+            display: flex; align-items: center; gap: 14px;
+        }
+        .stat-card.c-total    { border-color: #3b82f6; }
+        .stat-card.c-ok       { border-color: var(--ok); }
+        .stat-card.c-risk     { border-color: var(--warning); }
+        .stat-card.c-spoiled  { border-color: var(--spoiled); }
+
+        .stat-icon  { font-size: 30px; }
+        .stat-num   { font-size: 30px; font-weight: 700; line-height: 1; }
+        .stat-label { font-size: 11px; color: var(--muted); margin-top: 3px; text-transform: uppercase; letter-spacing: .5px; }
+
+        /* ── Middle row ── */
+        .mid-row { display: grid; grid-template-columns: 1fr 340px; gap: 16px; margin-bottom: 20px; }
+
+        /* ── Card shell ── */
+        .card { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+
+        .card-head {
+            padding: 13px 18px; border-bottom: 1px solid var(--border);
+            display: flex; align-items: center; justify-content: space-between;
+        }
+        .card-head h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+        .card-head small { font-size: 11px; color: var(--muted); }
+
+        /* ── Table ── */
+        table { width: 100%; border-collapse: collapse; }
+        th {
+            background: #f8fafc; padding: 9px 14px; text-align: left;
+            font-size: 10px; font-weight: 600; color: var(--muted);
+            text-transform: uppercase; letter-spacing: .5px;
+            border-bottom: 1px solid var(--border);
+        }
+        td { padding: 11px 14px; font-size: 13px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+        tr:last-child td { border-bottom: none; }
+        tr:hover td { background: #f8fafc; }
+
+        .fruit-cell { display: flex; align-items: center; gap: 7px; font-weight: 600; }
+
+        /* ── Badges ── */
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+        .b-ok       { background: var(--ok-bg);       color: #065f46; }
+        .b-warning  { background: var(--warning-bg);  color: #92400e; }
+        .b-critical { background: var(--critical-bg); color: #991b1b; }
+        .b-spoiled  { background: var(--spoiled-bg);  color: #5b21b6; }
+        .b-fresh    { background: #dbeafe;             color: #1e40af; }
+        .b-rotten   { background: var(--critical-bg); color: #991b1b; }
+
+        /* ── Days remaining colouring ── */
+        .d-ok       { color: var(--ok);       font-weight: 600; }
+        .d-warning  { color: var(--warning);  font-weight: 600; }
+        .d-critical { color: var(--critical); font-weight: 600; }
+        .d-spoiled  { color: var(--spoiled);  font-weight: 600; }
+
+        .muted { color: var(--muted); font-size: 12px; }
+
+        .rm-btn {
+            background: none; border: 1px solid var(--border); border-radius: 6px;
+            padding: 3px 8px; font-size: 11px; color: var(--muted);
+            cursor: pointer; transition: all .15s;
+        }
+        .rm-btn:hover { background: var(--critical-bg); border-color: var(--critical); color: var(--critical); }
+
+        /* ── Empty state ── */
+        .empty { padding: 36px; text-align: center; color: var(--muted); font-size: 13px; }
+
+        /* ── Alerts list ── */
+        .alert-item {
+            padding: 11px 16px; border-bottom: 1px solid var(--border);
+            display: flex; gap: 10px; align-items: flex-start;
+        }
+        .alert-item:last-child { border-bottom: none; }
+        .alert-ico  { font-size: 15px; flex-shrink: 0; margin-top: 1px; }
+        .alert-msg  { font-size: 12px; line-height: 1.45; }
+        .alert-time { font-size: 10px; color: var(--muted); margin-top: 3px; }
+
+        /* ── Charts ── */
+        .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+        .chart-wrap { padding: 14px 18px; height: 230px; position: relative; }
+
+        /* ── Footer ── */
+        .footer { text-align: center; padding: 10px; font-size: 11px; color: var(--muted); }
+
+        /* ── Responsive ── */
+        @media (max-width: 960px) {
+            .stats   { grid-template-columns: repeat(2,1fr); }
+            .mid-row { grid-template-columns: 1fr; }
+            .charts  { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <div class="header-left">
+        <h1>🍎 Fruit Monitor</h1>
+        <p>Smart AI Food Freshness Detection · Olabisi Onabanjo University</p>
+    </div>
+    <div class="header-right">
+        <span><span class="live-dot"></span>Live</span>
+        <span id="last-updated">—</span>
+        <span>↻ 15s</span>
+    </div>
+</header>
+
+<main>
+
+    <!-- Stats row -->
+    <div class="stats">
+        <div class="stat-card c-total">
+            <div class="stat-icon">🍽️</div>
+            <div><div class="stat-num" id="s-total">—</div><div class="stat-label">In Storage</div></div>
+        </div>
+        <div class="stat-card c-ok">
+            <div class="stat-icon">✅</div>
+            <div><div class="stat-num" id="s-ok">—</div><div class="stat-label">Healthy</div></div>
+        </div>
+        <div class="stat-card c-risk">
+            <div class="stat-icon">⚠️</div>
+            <div><div class="stat-num" id="s-risk">—</div><div class="stat-label">At Risk</div></div>
+        </div>
+        <div class="stat-card c-spoiled">
+            <div class="stat-icon">❌</div>
+            <div><div class="stat-num" id="s-spoiled">—</div><div class="stat-label">Spoiled</div></div>
+        </div>
+    </div>
+
+    <!-- Inventory + Alerts -->
+    <div class="mid-row">
+
+        <div class="card">
+            <div class="card-head">
+                <h2>📦 Fruit Inventory</h2>
+                <small id="inv-count"></small>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Fruit</th>
+                        <th>Status</th>
+                        <th>Days Left</th>
+                        <th>In Storage</th>
+                        <th>First Detected</th>
+                        <th>Readings</th>
+                        <th>Alert</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="inv-body">
+                    <tr><td colspan="8" class="empty">Loading inventory…</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <div class="card-head"><h2>🔔 Recent Alerts</h2></div>
+            <div id="alert-list"><div class="empty">Loading…</div></div>
+        </div>
+
+    </div>
+
+    <!-- Charts -->
+    <div class="charts">
+        <div class="card">
+            <div class="card-head"><h2>🌡️ Temperature & Humidity</h2></div>
+            <div class="chart-wrap"><canvas id="c-env"></canvas></div>
+        </div>
+        <div class="card">
+            <div class="card-head"><h2>💨 Gas Level (MQ-135 ADC)</h2></div>
+            <div class="chart-wrap"><canvas id="c-gas"></canvas></div>
+        </div>
+    </div>
+
+    <div class="footer">
+        Next refresh in <span id="cd">15</span>s &nbsp;·&nbsp;
+        Fruit Monitor v1.0 &nbsp;·&nbsp; Dept. of Computer Engineering, OOU
+    </div>
+
+</main>
+
+<script>
+const API = 'http://127.0.0.1:8000';
+
+const EMOJI = { apple:'🍎', banana:'🍌', orange:'🍊', tomato:'🍅', grape:'🍇', strawberry:'🍓', guava:'🍈' };
+
+const ALERT_BADGE = {
+    ok:       '<span class="badge b-ok">✓ OK</span>',
+    warning:  '<span class="badge b-warning">⚠ Warning</span>',
+    critical: '<span class="badge b-critical">⛔ Critical</span>',
+    spoiled:  '<span class="badge b-spoiled">✗ Spoiled</span>',
+};
+
+const ALERT_ICO = { warning:'⚠️', critical:'🚨', spoiled:'❌' };
+
+let envChart = null, gasChart = null, ticker = 15;
+
+// ── fetch helper ───────────────────────────────────────────
+async function api(path) {
+    try {
+        const r = await fetch(API + path);
+        return r.ok ? r.json() : null;
+    } catch { return null; }
+}
+
+// ── main refresh ───────────────────────────────────────────
+async function refresh() {
+    const [summary, inventory, preds, alerts] = await Promise.all([
+        api('/api/inventory/summary'),
+        api('/api/inventory'),
+        api('/api/predictions?limit=24'),
+        api('/api/alerts?limit=8'),
+    ]);
+
+    if (summary)   renderStats(summary);
+    if (inventory) renderInventory(inventory);
+    if (preds)     renderCharts(preds);
+    if (alerts)    renderAlerts(alerts);
+
+    document.getElementById('last-updated').textContent =
+        'Updated ' + new Date().toLocaleTimeString();
+    ticker = 15;
+}
+
+// ── stats ──────────────────────────────────────────────────
+function renderStats(s) {
+    document.getElementById('s-total').textContent   = s.total;
+    document.getElementById('s-ok').textContent      = s.by_alert_level.ok;
+    document.getElementById('s-risk').textContent    =
+        (s.by_alert_level.warning || 0) + (s.by_alert_level.critical || 0);
+    document.getElementById('s-spoiled').textContent = s.by_alert_level.spoiled;
+}
+
+// ── inventory ──────────────────────────────────────────────
+function renderInventory(items) {
+    document.getElementById('inv-count').textContent =
+        items.length + ' item' + (items.length !== 1 ? 's' : '');
+
+    if (!items.length) {
+        document.getElementById('inv-body').innerHTML =
+            '<tr><td colspan="8" class="empty">No fruits in storage yet. Send a reading from MQTTX.</td></tr>';
+        return;
+    }
+
+    document.getElementById('inv-body').innerHTML = items.map(it => {
+        const icon   = EMOJI[it.fruit_type] || '🍑';
+        const dc     = it.last_alert_level === 'spoiled'  ? 'd-spoiled'
+                     : it.last_alert_level === 'critical' ? 'd-critical'
+                     : it.last_alert_level === 'warning'  ? 'd-warning' : 'd-ok';
+        const days   = it.last_alert_level === 'spoiled'
+                     ? '<span class="d-spoiled">—</span>'
+                     : `<span class="${dc}">${it.last_days_remaining.toFixed(1)} d</span>`;
+        const fb     = it.last_freshness === 'fresh'
+                     ? '<span class="badge b-fresh">Fresh</span>'
+                     : '<span class="badge b-rotten">Rotten</span>';
+        const seen   = new Date(it.first_seen + 'Z').toLocaleString();
+
+        return `
+        <tr>
+          <td><div class="fruit-cell">${icon} ${cap(it.fruit_type)}</div></td>
+          <td>${fb}</td>
+          <td>${days}</td>
+          <td class="muted">⏱ ${it.time_in_storage_str}</td>
+          <td class="muted">${seen}</td>
+          <td class="muted">${it.reading_count}</td>
+          <td>${ALERT_BADGE[it.last_alert_level] ?? ''}</td>
+          <td><button class="rm-btn" onclick="removeFruit(${it.id},'${cap(it.fruit_type)}')">Remove</button></td>
+        </tr>`;
+    }).join('');
+}
+
+// ── charts ─────────────────────────────────────────────────
+function renderCharts(preds) {
+    const data   = [...preds].reverse();
+    const labels = data.map(p => new Date(p.created_at + 'Z').toLocaleTimeString());
+    const temps  = data.map(p => p.temperature ?? null);
+    const humids = data.map(p => p.humidity    ?? null);
+    const gas    = data.map(p => p.gas_level   ?? null);
+
+    // Env chart
+    if (envChart) {
+        envChart.data.labels = labels;
+        envChart.data.datasets[0].data = temps;
+        envChart.data.datasets[1].data = humids;
+        envChart.update('none');
+    } else {
+        envChart = new Chart(document.getElementById('c-env'), {
+            type: 'line',
+            data: {
+                labels,
+                datasets: [
+                    { label:'Temp (°C)',  data: temps,  borderColor:'#ef4444', backgroundColor:'rgba(239,68,68,.07)',  tension:.3, fill:true, yAxisID:'y'  },
+                    { label:'Humidity (%)', data: humids, borderColor:'#3b82f6', backgroundColor:'rgba(59,130,246,.07)', tension:.3, fill:true, yAxisID:'y1' },
+                ],
+            },
+            options: dualAxisOpts('°C', '%'),
+        });
+    }
+
+    // Gas chart
+    if (gasChart) {
+        gasChart.data.labels = labels;
+        gasChart.data.datasets[0].data = gas;
+        gasChart.update('none');
+    } else {
+        gasChart = new Chart(document.getElementById('c-gas'), {
+            type: 'line',
+            data: {
+                labels,
+                datasets: [{ label:'Gas ADC', data: gas, borderColor:'#f59e0b', backgroundColor:'rgba(245,158,11,.07)', tension:.3, fill:true }],
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { ticks: { maxTicksLimit:6, font:{size:10} }, grid:{display:false} },
+                    y: { ticks: { font:{size:10} } },
+                },
+            },
+        });
+    }
+}
+
+function dualAxisOpts(l1, l2) {
+    return {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode:'index', intersect:false },
+        plugins: { legend: { labels: { font:{size:11} } } },
+        scales: {
+            x:  { ticks:{maxTicksLimit:6, font:{size:10}}, grid:{display:false} },
+            y:  { position:'left',  ticks:{font:{size:10}}, title:{display:true, text:l1, font:{size:10}} },
+            y1: { position:'right', ticks:{font:{size:10}}, title:{display:true, text:l2, font:{size:10}}, grid:{drawOnChartArea:false} },
+        },
+    };
+}
+
+// ── alerts ─────────────────────────────────────────────────
+function renderAlerts(alerts) {
+    if (!alerts.length) {
+        document.getElementById('alert-list').innerHTML =
+            '<div class="empty">No alerts — all fruits are healthy 🎉</div>';
+        return;
+    }
+    document.getElementById('alert-list').innerHTML = alerts.map(a => {
+        const faded = a.acknowledged ? ' style="opacity:.5"' : '';
+        return `
+        <div class="alert-item"${faded}>
+          <span class="alert-ico">${ALERT_ICO[a.alert_type] ?? '⚠️'}</span>
+          <div>
+            <div class="alert-msg">${a.message}</div>
+            <div class="alert-time">${new Date(a.sent_at + 'Z').toLocaleString()}${a.acknowledged ? ' · Acknowledged' : ''}</div>
+          </div>
+        </div>`;
+    }).join('');
+}
+
+// ── remove fruit ───────────────────────────────────────────
+async function removeFruit(id, name) {
+    if (!confirm(`Remove ${name} from storage? This closes the monitoring session.`)) return;
+    const r = await fetch(`${API}/api/inventory/${id}`, { method:'DELETE' });
+    if (r.ok) refresh();
+    else alert('Could not remove. Check the server is running.');
+}
+
+// ── helpers ────────────────────────────────────────────────
+const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+
+// ── auto-refresh countdown ─────────────────────────────────
+setInterval(() => {
+    ticker--;
+    document.getElementById('cd').textContent = ticker;
+    if (ticker <= 0) refresh();
+}, 1000);
+
+refresh();   // load immediately on page open
+</script>
+
+</body>
+</html>

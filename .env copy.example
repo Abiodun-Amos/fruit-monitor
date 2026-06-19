@@ -1,0 +1,24 @@
+# ── MQTT Broker (HiveMQ Cloud — free tier) ─────────────────────
+MQTT_BROKER_HOST=your-cluster.hivemq.cloud
+MQTT_BROKER_PORT=8883
+MQTT_USERNAME=your_username
+MQTT_PASSWORD=your_password
+
+# ── MQTT Topics ────────────────────────────────────────────────
+MQTT_TOPIC_SENSOR=fruit/sensor/data
+MQTT_TOPIC_PREDICTION=fruit/prediction/result
+MQTT_TOPIC_ALERT=fruit/alert/spoilage
+MQTT_TOPIC_COUNT=fruit/count/update
+
+# ── Backend ────────────────────────────────────────────────────
+BACKEND_HOST=0.0.0.0
+BACKEND_PORT=8000
+DATABASE_URL=sqlite+aiosqlite:///./fruit_monitor.db
+
+# ── Alerts ─────────────────────────────────────────────────────
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
+
+# ── Spoilage Thresholds ────────────────────────────────────────
+ALERT_DAYS_THRESHOLD=2        # alert when days_remaining <= this
+CRITICAL_DAYS_THRESHOLD=1     # critical alert when <= this
