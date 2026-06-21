@@ -19,6 +19,9 @@ import json
 import logging
 import ssl
 from datetime import datetime
+import httpx
+from .camera_state import camera_state
+from .inference import classify_image
 
 import paho.mqtt.client as mqtt
 
@@ -114,6 +117,8 @@ class MQTTClient:
             logger.info("MQTT connected → %s", settings.MQTT_BROKER_HOST)
             client.subscribe(settings.MQTT_TOPIC_SENSOR, qos=1)
             logger.info("Subscribed to %s", settings.MQTT_TOPIC_SENSOR)
+            client.subscribe(settings.MQTT_TOPIC_CAMERA, qos=1)
+            logger.info("Subscribed to %s", settings.MQTT_TOPIC_CAMERA)
         else:
             logger.error("MQTT connection refused (rc=%d). Check credentials.", rc)
 
@@ -122,15 +127,17 @@ class MQTTClient:
             logger.warning("MQTT disconnected unexpectedly (rc=%d)", rc)
 
     def _on_message(self, client, userdata, msg):
-        """Decode JSON and push onto the async queue — thread-safe."""
+        """Decode JSON and route to the async queue with topic context."""
         try:
             payload = json.loads(msg.payload.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             logger.error("Bad payload on %s: %s", msg.topic, exc)
             return
 
+        # Tag the payload with which topic it came from
+        envelope = {"topic": msg.topic, "payload": payload}
         if self._loop and not self._loop.is_closed():
-            asyncio.run_coroutine_threadsafe(self._queue.put(payload), self._loop)
+            asyncio.run_coroutine_threadsafe(self._queue.put(envelope), self._loop)
 
     # ── Lifecycle ─────────────────────────────────────────────
 
@@ -153,16 +160,23 @@ class MQTTClient:
     # ── Async pipeline ────────────────────────────────────────
 
     async def _process_queue(self):
-        """Drain the queue one message at a time."""
+        """Drain the queue, routing each message by its topic."""
         while True:
             try:
-                payload = await self._queue.get()
-                await self._handle_message(payload)
+                envelope = await self._queue.get()
+                topic   = envelope.get("topic", "")
+                payload = envelope.get("payload", {})
+
+                if topic == settings.MQTT_TOPIC_CAMERA:
+                    await self._handle_camera(payload)
+                else:
+                    await self._handle_message(payload)
+
                 self._queue.task_done()
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.exception("Unhandled error in queue processor: %s", exc)
+                logger.exception("Queue processor error: %s", exc)
 
     async def _handle_message(self, payload: dict):
         """validate → normalise → engine → DB → publish → alert."""
@@ -175,7 +189,15 @@ class MQTTClient:
             return
 
         # ── 2. Parse & normalise ──────────────────────────────
-        ml_label              = str(payload["ml_label"])
+        # Option A: prefer the latest camera classification if available;
+        # fall back to the device's own label (useful before camera is live)
+        cam_label, cam_conf = camera_state.get()
+        if cam_label:
+            ml_label      = cam_label
+            ml_confidence = cam_conf
+        else:
+            ml_label      = str(payload["ml_label"])
+            ml_confidence = float(payload["confidence"])
         fruit_type, freshness = _parse_ml_label(ml_label)
         gas_raw               = float(payload["gas_raw"])
         gas_normalised        = _normalise_gas(gas_raw)
@@ -186,7 +208,7 @@ class MQTTClient:
                 humidity_pct   = float(payload["humidity"]),
                 gas_normalised = gas_normalised,
                 ml_label       = ml_label,
-                ml_confidence  = float(payload["confidence"]),
+                ml_confidence  = ml_confidence,
                 timestamp      = datetime.utcnow(),
             )
         except (ValueError, TypeError) as exc:
@@ -259,6 +281,41 @@ class MQTTClient:
                 fruit_name     = result.fruit_name,
                 days_remaining = result.days_remaining,
             )
+
+    async def _handle_camera(self, payload: dict):
+        """
+        Camera message: { "device_id": "...", "image_url": "https://..." }
+        Download the image, run inference, cache the result for the
+        sensor pipeline to use (Option A).
+        """
+        image_url = payload.get("image_url")
+        if not image_url:
+            logger.warning("Camera message missing image_url: %s", payload)
+            return
+
+        logger.info("Camera image received: %s", image_url)
+
+        # Download the image
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.get(image_url)
+                resp.raise_for_status()
+                image_bytes = resp.content
+        except Exception as exc:
+            logger.error("Failed to download camera image: %s", exc)
+            return
+
+        # Run inference (blocking — push to thread pool)
+        try:
+            loop   = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, classify_image, image_bytes)
+        except Exception as exc:
+            logger.error("Camera inference failed: %s", exc)
+            return
+
+        camera_state.update(result["ml_label"], result["confidence"])
+        logger.info("Camera classified → %s (%.2f)",
+                    result["ml_label"], result["confidence"])
 
     # ── Outbound ──────────────────────────────────────────────
 

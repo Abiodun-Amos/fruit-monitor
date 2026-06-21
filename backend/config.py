@@ -22,6 +22,7 @@ class Settings:
     MQTT_TOPIC_PREDICTION: str = os.getenv("MQTT_TOPIC_PREDICTION", "fruit/prediction/result")
     MQTT_TOPIC_ALERT: str      = os.getenv("MQTT_TOPIC_ALERT",      "fruit/alert/spoilage")
     MQTT_TOPIC_COUNT: str      = os.getenv("MQTT_TOPIC_COUNT",      "fruit/count/update")
+    MQTT_TOPIC_CAMERA: str     = os.getenv("MQTT_TOPIC_CAMERA", "fruit/camera/image")
 
     # ── Backend ───────────────────────────────────────────────────
     BACKEND_HOST: str = os.getenv("BACKEND_HOST", "0.0.0.0")
