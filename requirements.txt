@@ -1,7 +1,8 @@
 # ── ML Inference (lightweight — for camera /infer endpoint) ────
 # tensorflow>=2.13.0          
 # scikit-learn>=1.3.0         
-tflite-runtime>=2.14.0
+# tflite-runtime>=2.14.0
+ai-edge-litert>=1.0.0
 Pillow>=10.0.0
 numpy>=1.24.0
 

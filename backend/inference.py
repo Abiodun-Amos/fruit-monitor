@@ -35,9 +35,12 @@ def _load():
 
     # Import here so the app can still boot if tflite isn't installed
     try:
-        from tflite_runtime.interpreter import Interpreter
+        from ai_edge_litert.interpreter import Interpreter
     except ImportError:
-        from tensorflow.lite import Interpreter  # fallback if full TF present
+        try:
+            from tflite_runtime.interpreter import Interpreter
+        except ImportError:
+            from tensorflow.lite import Interpreter
 
     logger.info("Loading TFLite model from %s", _MODEL_PATH)
     _interpreter = Interpreter(model_path=str(_MODEL_PATH))
