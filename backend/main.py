@@ -73,4 +73,19 @@ async def root():
 async def health():
     return {"status": "healthy", "version": "1.0.0"}
 
+from fastapi import UploadFile, File
+
+@app.post("/api/infer", tags=["Inference"])
+async def infer(file: UploadFile = File(...)):
+    """Classify an uploaded fruit image. Test endpoint for camera path."""
+    from .inference import classify_image
+    image_bytes = await file.read()
+    try:
+        result = classify_image(image_bytes)
+        return result
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).exception("Inference failed")
+        return {"error": str(exc)}
+
 app.mount("/dashboard", StaticFiles(directory="dashboard", html=True), name="dashboard")
