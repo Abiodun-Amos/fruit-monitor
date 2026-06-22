@@ -17,8 +17,6 @@ from .database import init_db
 from .mqtt_client import MQTTClient
 from .routes import alerts, export, fruits, inventory, predictions
 
-app.include_router(export.router, prefix="/api/export", tags=["Export"])
-
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,6 +62,7 @@ app.include_router(fruits.router,      prefix="/api/fruits",       tags=["Fruit 
 app.include_router(predictions.router, prefix="/api/predictions",  tags=["Predictions"])
 app.include_router(alerts.router,      prefix="/api/alerts",       tags=["Alerts"])
 app.include_router(inventory.router,   prefix="/api/inventory",    tags=["Inventory"])
+app.include_router(export.router,      prefix="/api/export",       tags=["Export"])
 
 
 @app.get("/", tags=["Health"])
