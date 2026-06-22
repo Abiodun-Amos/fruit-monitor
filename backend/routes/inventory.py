@@ -3,7 +3,7 @@ routes/inventory.py
 Fruit inventory — what is currently in storage, when it arrived,
 and how long it has been there.
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import and_, func, select
@@ -40,22 +40,30 @@ def _to_dict(s: FruitSession) -> dict:
 
 @router.get("/")
 async def get_inventory(db: AsyncSession = Depends(get_db)):
-    """All fruits currently in storage, ordered by arrival time."""
+    """Fruits currently in storage (seen within the active window)."""
+    cutoff = datetime.utcnow() - timedelta(minutes=ACTIVE_WINDOW_MINUTES)
     stmt = (
         select(FruitSession)
-        .where(FruitSession.is_active == True)   # noqa: E712
+        .where(FruitSession.is_active == True)      # noqa: E712
+        .where(FruitSession.last_seen >= cutoff)
         .order_by(FruitSession.first_seen)
     )
     rows = (await db.execute(stmt)).scalars().all()
     return [_to_dict(r) for r in rows]
 
 
+# A session is "active" if seen within this window
+ACTIVE_WINDOW_MINUTES = 10
+
+
 @router.get("/summary")
 async def inventory_summary(db: AsyncSession = Depends(get_db)):
-    """Total count + breakdown by alert level."""
+    """Count of fruits seen recently (currently active), by alert level."""
+    cutoff = datetime.utcnow() - timedelta(minutes=ACTIVE_WINDOW_MINUTES)
     stmt = (
         select(FruitSession.last_alert_level, func.count(FruitSession.id))
-        .where(FruitSession.is_active == True)   # noqa: E712
+        .where(FruitSession.is_active == True)          # noqa: E712
+        .where(FruitSession.last_seen >= cutoff)         # only recently seen
         .group_by(FruitSession.last_alert_level)
     )
     rows   = (await db.execute(stmt)).all()

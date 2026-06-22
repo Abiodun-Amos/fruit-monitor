@@ -15,7 +15,9 @@ from fastapi.staticfiles import StaticFiles
 from .config import settings
 from .database import init_db
 from .mqtt_client import MQTTClient
-from .routes import alerts, fruits, inventory, predictions
+from .routes import alerts, export, fruits, inventory, predictions
+
+app.include_router(export.router, prefix="/api/export", tags=["Export"])
 
 
 logging.basicConfig(
