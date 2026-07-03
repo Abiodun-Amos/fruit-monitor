@@ -22,6 +22,13 @@
 #define DHT_PIN      4       // GPIO4  — DHT22 data
 #define DHT_TYPE     DHT22
 #define MQ135_PIN    34      // GPIO34 — MQ-135 AO (via voltage divider)
+// ── Button / pause-resume state ───────────────────────────────
+#define BUTTON_PIN   13      // GPIO13 — pause/resume push button
+#define DEBOUNCE_MS  300
+
+bool          monitoringActive = true;   // starts ON
+bool          lastButtonState  = HIGH;
+unsigned long lastButtonPress  = 0;
 
 // ── Publish interval ──────────────────────────────────────────
 #define INTERVAL_MS  30000UL   // 30 seconds
@@ -120,6 +127,7 @@ void setup() {
     Serial.println("\n====== Fruit Monitor - ESP32 DevKitC Firmware ======");
 
     dht.begin();
+    pinMode(BUTTON_PIN, INPUT_PULLUP);   // button connects pin to GND when pressed
     analogReadResolution(12);   // 12-bit ADC -> values 0-4095
 
     connectWiFi();
@@ -135,8 +143,32 @@ void setup() {
     readAndPublish();
     lastPublish = millis();
 
+    bool          monitoringActive = true;   // starts ON
+    bool          lastButtonState  = HIGH;
+    unsigned long lastButtonPress  = 0;
+    #define DEBOUNCE_MS  300
+
     Serial.printf("\nReading every %lu seconds. Monitoring: %s\n\n",
                   INTERVAL_MS / 1000, fruitLabel.c_str());
+}
+
+void checkButton() {
+    bool state = digitalRead(BUTTON_PIN);
+
+    // Detect a press (HIGH → LOW transition) with debounce
+    if (state == LOW && lastButtonState == HIGH &&
+        (millis() - lastButtonPress) > DEBOUNCE_MS) {
+
+        monitoringActive = !monitoringActive;     // toggle
+        lastButtonPress  = millis();
+
+        if (monitoringActive) {
+            Serial.println("\n>>> MONITORING RESUMED <<<\n");
+        } else {
+            Serial.println("\n>>> MONITORING PAUSED <<<\n");
+        }
+    }
+    lastButtonState = state;
 }
 
 void loop() {
@@ -144,7 +176,9 @@ void loop() {
     if (!mqtt.connected())              connectMQTT();
     mqtt.loop();
 
-    if (millis() - lastPublish >= INTERVAL_MS) {
+    checkButton();   // always check the button, even when paused
+
+    if (monitoringActive && (millis() - lastPublish >= INTERVAL_MS)) {
         lastPublish = millis();
         readAndPublish();
     }
