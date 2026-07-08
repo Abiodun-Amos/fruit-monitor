@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
 from ..models import FruitSession
+from ..device_state import device_state
 
 router = APIRouter()
 
@@ -91,3 +92,8 @@ async def remove_fruit(session_id: int, db: AsyncSession = Depends(get_db)):
     row.is_active = False
     await db.commit()
     return {"id": session_id, "fruit_type": row.fruit_type, "removed": True}
+
+@router.get("/device-status")
+async def get_device_status():
+    """Latest paused/resumed status per device."""
+    return device_state.get_all()

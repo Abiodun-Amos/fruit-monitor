@@ -173,6 +173,11 @@
     </div>
 </header>
 
+<div id="pause-banner" style="display:none; background:#f59e0b; color:#fff;
+     text-align:center; padding:8px; font-weight:600; font-size:13px;">
+    ⏸ Monitoring Paused — device is not sending new readings
+</div>
+
 <main>
 
     <!-- Stats row -->
@@ -270,6 +275,32 @@ async function api(path) {
         const r = await fetch(API + path);
         return r.ok ? r.json() : null;
     } catch { return null; }
+}
+
+async function refresh() {
+    const [summary, inventory, preds, alerts, deviceStatus] = await Promise.all([
+        api('/api/inventory/summary'),
+        api('/api/inventory'),
+        api('/api/predictions?limit=24'),
+        api('/api/alerts?limit=8'),
+        api('/api/inventory/device-status'),
+    ]);
+
+    if (summary)   renderStats(summary);
+    if (inventory) renderInventory(inventory);
+    if (preds)     renderCharts(preds);
+    if (alerts)    renderAlerts(alerts);
+    if (deviceStatus) renderDeviceStatus(deviceStatus);
+
+    document.getElementById('last-updated').textContent =
+        'Updated ' + new Date().toLocaleTimeString();
+    ticker = 15;
+}
+
+function renderDeviceStatus(statusMap) {
+    const banner = document.getElementById('pause-banner');
+    const anyPaused = Object.values(statusMap).some(d => d.status === 'paused');
+    banner.style.display = anyPaused ? 'block' : 'none';
 }
 
 // ── main refresh ───────────────────────────────────────────

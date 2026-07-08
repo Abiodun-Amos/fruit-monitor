@@ -21,6 +21,7 @@ import ssl
 from datetime import datetime
 import httpx
 from .camera_state import camera_state
+from .device_state import device_state
 from .inference import classify_image
 
 import paho.mqtt.client as mqtt
@@ -119,6 +120,8 @@ class MQTTClient:
             logger.info("Subscribed to %s", settings.MQTT_TOPIC_SENSOR)
             client.subscribe(settings.MQTT_TOPIC_CAMERA, qos=1)
             logger.info("Subscribed to %s", settings.MQTT_TOPIC_CAMERA)
+            client.subscribe(settings.MQTT_TOPIC_DEVICE_STATUS, qos=1)
+            logger.info("Subscribed to %s", settings.MQTT_TOPIC_DEVICE_STATUS)
         else:
             logger.error("MQTT connection refused (rc=%d). Check credentials.", rc)
 
@@ -169,6 +172,13 @@ class MQTTClient:
 
                 if topic == settings.MQTT_TOPIC_CAMERA:
                     await self._handle_camera(payload)
+                else:
+                    await self._handle_message(payload)
+
+                if topic == settings.MQTT_TOPIC_CAMERA:
+                    await self._handle_camera(payload)
+                elif topic == settings.MQTT_TOPIC_DEVICE_STATUS:
+                    self._handle_status(payload)
                 else:
                     await self._handle_message(payload)
 
@@ -316,6 +326,12 @@ class MQTTClient:
         camera_state.update(result["ml_label"], result["confidence"])
         logger.info("Camera classified → %s (%.2f)",
                     result["ml_label"], result["confidence"])
+        
+    def _handle_status(self, payload: dict):
+        device_id = payload.get("device_id", "unknown")
+        status    = payload.get("status", "unknown")
+        device_state.update(device_id, status)
+        logger.info("Device %s status → %s", device_id, status)
 
     # ── Outbound ──────────────────────────────────────────────
 

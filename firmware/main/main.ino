@@ -138,6 +138,7 @@ void setup() {
     mqtt.setBufferSize(512);
 
     connectMQTT();
+    publishStatus("resumed");   // system starts active
 
     // Publish immediately on boot - don't wait 30s for first reading
     readAndPublish();
@@ -152,20 +153,32 @@ void setup() {
                   INTERVAL_MS / 1000, fruitLabel.c_str());
 }
 
+void publishStatus(const char* status) {
+    JsonDocument doc;
+    doc["device_id"] = DEVICE_ID;
+    doc["status"]     = status;   // "paused" or "resumed"
+    doc["ts"]         = (long)time(nullptr);
+
+    char buf[128];
+    serializeJson(doc, buf);
+    mqtt.publish("fruit/device/status", buf, true);   // retained=true
+}
+
 void checkButton() {
     bool state = digitalRead(BUTTON_PIN);
 
-    // Detect a press (HIGH → LOW transition) with debounce
     if (state == LOW && lastButtonState == HIGH &&
         (millis() - lastButtonPress) > DEBOUNCE_MS) {
 
-        monitoringActive = !monitoringActive;     // toggle
+        monitoringActive = !monitoringActive;
         lastButtonPress  = millis();
 
         if (monitoringActive) {
             Serial.println("\n>>> MONITORING RESUMED <<<\n");
+            publishStatus("resumed");
         } else {
             Serial.println("\n>>> MONITORING PAUSED <<<\n");
+            publishStatus("paused");
         }
     }
     lastButtonState = state;
