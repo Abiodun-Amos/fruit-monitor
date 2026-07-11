@@ -97,3 +97,17 @@ async def remove_fruit(session_id: int, db: AsyncSession = Depends(get_db)):
 async def get_device_status():
     """Latest paused/resumed status per device."""
     return device_state.get_all()
+
+ONLINE_WINDOW_SECONDS = 90  # no reading in this window = offline
+
+@router.get("/system-status")
+async def system_status(db: AsyncSession = Depends(get_db)):
+    """Whether the system is currently sending live data."""
+    cutoff = datetime.utcnow() - timedelta(seconds=ONLINE_WINDOW_SECONDS)
+    stmt = select(func.max(FruitSession.last_seen))
+    last_seen = (await db.execute(stmt)).scalar_one_or_none()
+    online = bool(last_seen and last_seen >= cutoff)
+    return {
+        "online": online,
+        "last_seen": last_seen.isoformat() if last_seen else None,
+    }

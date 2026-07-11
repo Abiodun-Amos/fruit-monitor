@@ -162,7 +162,7 @@
         <p>Smart AI Food Freshness Detection · Olabisi Onabanjo University</p>
     </div>
     <div class="header-right">
-        <span><span class="live-dot"></span>Live</span>
+        <span><span class="live-dot" id="live-dot"></span><span id="live-text">Live</span></span>
         <span id="last-updated">—</span>
         <span>↻ 15s</span>
         <a href="/api/export/csv" download
@@ -278,29 +278,37 @@ async function api(path) {
 }
 
 async function refresh() {
-    const [summary, inventory, preds, alerts, deviceStatus] = await Promise.all([
+    const [summary, inventory, preds, alerts, sysStatus] = await Promise.all([
         api('/api/inventory/summary'),
         api('/api/inventory'),
         api('/api/predictions?limit=24'),
         api('/api/alerts?limit=8'),
-        api('/api/inventory/device-status'),
+        api('/api/inventory/system-status'),
     ]);
 
     if (summary)   renderStats(summary);
     if (inventory) renderInventory(inventory);
     if (preds)     renderCharts(preds);
     if (alerts)    renderAlerts(alerts);
-    if (deviceStatus) renderDeviceStatus(deviceStatus);
+    if (sysStatus) renderSystemStatus(sysStatus);
 
     document.getElementById('last-updated').textContent =
         'Updated ' + new Date().toLocaleTimeString();
     ticker = 15;
 }
 
-function renderDeviceStatus(statusMap) {
-    const banner = document.getElementById('pause-banner');
-    const anyPaused = Object.values(statusMap).some(d => d.status === 'paused');
-    banner.style.display = anyPaused ? 'block' : 'none';
+function renderSystemStatus(status) {
+    const dot  = document.getElementById('live-dot');
+    const text = document.getElementById('live-text');
+    if (status.online) {
+        dot.style.background = '#10b981';
+        dot.style.animation  = 'blink 2s infinite';
+        text.textContent = 'Live';
+    } else {
+        dot.style.background = '#ef4444';
+        dot.style.animation  = 'none';
+        text.textContent = 'Offline';
+    }
 }
 
 // ── main refresh ───────────────────────────────────────────
