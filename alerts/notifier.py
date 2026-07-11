@@ -13,6 +13,7 @@ import asyncio
 import logging
 import smtplib
 import ssl
+import httpx
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -98,7 +99,7 @@ class AlertNotifier:
         fruit_name:     str,
         days_remaining: float,
     ):
-        if not (self._s.EMAIL_FROM and self._s.EMAIL_TO and self._s.EMAIL_APP_PASSWORD):
+        if not (self._s.RESEND_API_KEY and self._s.EMAIL_TO):
             return
 
         icon    = _LEVEL_ICON.get(alert_level, "⚠️")
@@ -108,13 +109,11 @@ class AlertNotifier:
             if fruit_name else
             f"{icon} Fruit Monitor Alert — {alert_level.capitalize()}"
         )
-
         days_line = (
             f"<p style='margin:8px 0;color:#374151;'>"
             f"⏱ Days remaining: <strong>{days_remaining:.1f} days</strong></p>"
             if days_remaining > 0 else ""
         )
-
         html = f"""
         <html><body style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
           <div style="background:{colour};padding:20px 24px;border-radius:8px 8px 0 0;">
@@ -125,37 +124,27 @@ class AlertNotifier:
                       border-top:none;border-radius:0 0 8px 8px;">
             <p style="font-size:15px;color:#111827;margin:0 0 12px;">{message}</p>
             {days_line}
-            <hr style="border:none;border-top:1px solid #e5e7eb;margin:16px 0;">
-            <p style="font-size:11px;color:#9ca3af;margin:0;">
-              Sent by Fruit Monitor IoT System
-            </p>
           </div>
         </body></html>
         """
 
         try:
-            # SMTP is blocking — run it off the event loop
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None,
-                self._send_smtp,
-                subject, html, message,
-            )
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    "https://api.resend.com/emails",
+                    headers={
+                        "Authorization": f"Bearer {self._s.RESEND_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "from": "Fruit Monitor <onboarding@resend.dev>",
+                        "to": [self._s.EMAIL_TO],
+                        "subject": subject,
+                        "html": html,
+                        "text": message,
+                    },
+                )
+                resp.raise_for_status()
             logger.info("Email alert sent → %s (%s)", self._s.EMAIL_TO, alert_level)
         except Exception as exc:
             logger.error("Email send failed: %s", exc)
-
-    def _send_smtp(self, subject: str, html: str, plain: str):
-        """Blocking Gmail SMTP send — port 465 SSL."""
-        msg            = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"]    = self._s.EMAIL_FROM
-        msg["To"]      = self._s.EMAIL_TO
-
-        msg.attach(MIMEText(plain, "plain"))
-        msg.attach(MIMEText(html,  "html"))
-
-        ctx = ssl.create_default_context()
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx) as server:
-            server.login(self._s.EMAIL_FROM, self._s.EMAIL_APP_PASSWORD)
-            server.sendmail(self._s.EMAIL_FROM, self._s.EMAIL_TO, msg.as_string())

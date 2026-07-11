@@ -44,7 +44,6 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────
 GAS_ADC_MAX = 4095.0
-ALERT_LEVELS_THAT_NOTIFY = {"warning", "critical", "spoiled"}
 
 # One shared predictor — stateless, safe to reuse across messages
 _predictor = SpoilagePredictor(
@@ -238,8 +237,8 @@ class MQTTClient:
             result.days_remaining, result.alert_level.value, result.confidence,
         )
 
-        # Determine alert need BEFORE entering the DB block
-        needs_alert = result.alert_level.value in ALERT_LEVELS_THAT_NOTIFY
+        # Alert on ANY state change (including into "ok")
+        needs_alert = result.alert_level.value != previous_alert_level
 
         # ── 4. Persist to DB ──────────────────────────────────
         async with AsyncSessionLocal() as db:
@@ -322,6 +321,13 @@ class MQTTClient:
         except Exception as exc:
             logger.error("Camera inference failed: %s", exc)
             return
+
+        MIN_CONFIDENCE = 0.60   # tune this once you have real fruit test data
+
+        if result["confidence"] < MIN_CONFIDENCE:
+            logger.info("Low-confidence camera result ignored → %s (%.2f)",
+                        result["ml_label"], result["confidence"])
+            return   # keep whatever the last confident label was
 
         camera_state.update(result["ml_label"], result["confidence"])
         logger.info("Camera classified → %s (%.2f)",

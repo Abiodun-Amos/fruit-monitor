@@ -32,7 +32,8 @@ class Settings:
 
     # ── Alerts ────────────────────────────────────────────────────
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    TELEGRAM_CHAT_ID: str   = os.getenv("TELEGRAM_CHAT_ID",   "")
+    TELEGRAM_CHAT_ID:   str = os.getenv("TELEGRAM_CHAT_ID",   "")
+    RESEND_API_KEY:     str = os.getenv("RESEND_API_KEY",     "")
 
     EMAIL_FROM:         str = os.getenv("EMAIL_FROM",         "")
     EMAIL_TO:           str = os.getenv("EMAIL_TO",           "")
