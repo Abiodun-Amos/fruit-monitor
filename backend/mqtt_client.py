@@ -19,18 +19,17 @@ import json
 import logging
 import ssl
 from datetime import datetime
+
 import httpx
-from .camera_state import camera_state
-from .device_state import device_state
-from .inference import classify_image
-
 import paho.mqtt.client as mqtt
+from sqlalchemy import and_, select as sa_select
 
+from .camera_state import camera_state
 from .config import settings
 from .database import AsyncSessionLocal
-# from .models import Alert, FruitReading, Prediction
+from .device_state import device_state
+from .inference import classify_image
 from .models import Alert, FruitReading, FruitSession, Prediction
-from sqlalchemy import and_, select as sa_select
 
 # Absolute imports — works when uvicorn runs from fruit_monitor/
 from spoilage_engine.baselines import is_fresh_label
@@ -87,7 +86,6 @@ class MQTTClient:
 
         self._configure_tls()
         self._bind_callbacks()
-        self._notifier = AlertNotifier(settings)
 
     # ── Setup ─────────────────────────────────────────────────
 
@@ -100,15 +98,6 @@ class MQTTClient:
         self._client.on_connect    = self._on_connect
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message    = self._on_message
-
-    def _init_telegram(self):
-        if settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID:
-            try:
-                from telegram import Bot
-                self._telegram_bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
-                logger.info("Telegram bot ready")
-            except Exception as exc:
-                logger.warning("Telegram init failed (alerts will be skipped): %s", exc)
 
     # ── Paho callbacks (paho's thread) ────────────────────────
 
@@ -136,7 +125,6 @@ class MQTTClient:
             logger.error("Bad payload on %s: %s", msg.topic, exc)
             return
 
-        # Tag the payload with which topic it came from
         envelope = {"topic": msg.topic, "payload": payload}
         if self._loop and not self._loop.is_closed():
             asyncio.run_coroutine_threadsafe(self._queue.put(envelope), self._loop)
@@ -162,17 +150,12 @@ class MQTTClient:
     # ── Async pipeline ────────────────────────────────────────
 
     async def _process_queue(self):
-        """Drain the queue, routing each message by its topic."""
+        """Drain the queue, routing EACH message to exactly ONE handler."""
         while True:
             try:
                 envelope = await self._queue.get()
                 topic   = envelope.get("topic", "")
                 payload = envelope.get("payload", {})
-
-                if topic == settings.MQTT_TOPIC_CAMERA:
-                    await self._handle_camera(payload)
-                else:
-                    await self._handle_message(payload)
 
                 if topic == settings.MQTT_TOPIC_CAMERA:
                     await self._handle_camera(payload)
@@ -207,6 +190,7 @@ class MQTTClient:
         else:
             ml_label      = str(payload["ml_label"])
             ml_confidence = float(payload["confidence"])
+
         fruit_type, freshness = _parse_ml_label(ml_label)
         gas_raw               = float(payload["gas_raw"])
         gas_normalised        = _normalise_gas(gas_raw)
@@ -237,10 +221,8 @@ class MQTTClient:
             result.days_remaining, result.alert_level.value, result.confidence,
         )
 
-        # Alert on ANY state change (including into "ok")
-        needs_alert = result.alert_level.value != previous_alert_level
-
-        # ── 4. Persist to DB ──────────────────────────────────
+        # ── 4. Persist to DB (and work out alert-worthiness) ──
+        needs_alert = False
         async with AsyncSessionLocal() as db:
             try:
                 reading_row = FruitReading(
@@ -263,7 +245,16 @@ class MQTTClient:
                     alert_level       = result.alert_level.value,
                     engine_confidence = result.confidence,
                 ))
-                await self._upsert_session(db, str(payload["device_id"]), fruit_type, freshness, result)
+
+                # previous_alert_level is the state BEFORE this reading —
+                # None if this is a brand new session
+                previous_alert_level = await self._upsert_session(
+                    db, str(payload["device_id"]), fruit_type, freshness, result
+                )
+
+                # Alert on ANY state change (including into "ok") — but
+                # never repeat the same state twice in a row
+                needs_alert = result.alert_level.value != previous_alert_level
 
                 if needs_alert:
                     db.add(Alert(
@@ -304,7 +295,6 @@ class MQTTClient:
 
         logger.info("Camera image received: %s", image_url)
 
-        # Download the image
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.get(image_url)
@@ -314,7 +304,6 @@ class MQTTClient:
             logger.error("Failed to download camera image: %s", exc)
             return
 
-        # Run inference (blocking — push to thread pool)
         try:
             loop   = asyncio.get_running_loop()
             result = await loop.run_in_executor(None, classify_image, image_bytes)
@@ -327,12 +316,12 @@ class MQTTClient:
         if result["confidence"] < MIN_CONFIDENCE:
             logger.info("Low-confidence camera result ignored → %s (%.2f)",
                         result["ml_label"], result["confidence"])
-            return   # keep whatever the last confident label was
+            return
 
         camera_state.update(result["ml_label"], result["confidence"])
         logger.info("Camera classified → %s (%.2f)",
                     result["ml_label"], result["confidence"])
-        
+
     def _handle_status(self, payload: dict):
         device_id = payload.get("device_id", "unknown")
         status    = payload.get("status", "unknown")
@@ -353,10 +342,12 @@ class MQTTClient:
         except Exception as exc:
             logger.error("Prediction publish failed: %s", exc)
 
-    async def _upsert_session(self, db, device_id: str, fruit_type: str, freshness: str, result):
+    async def _upsert_session(self, db, device_id: str, fruit_type: str, freshness: str, result) -> str | None:
         """
-        Create or update the FruitSession row for this device + fruit combination.
-        Called inside the existing DB transaction so no separate commit needed.
+        Create or update the FruitSession row for this device + fruit
+        combination. Returns the PREVIOUS alert_level (None for a brand
+        new session) so the caller can tell whether this reading is a
+        genuinely NEW state, not a repeat of the last one.
         """
         stmt = sa_select(FruitSession).where(
             and_(
@@ -368,36 +359,24 @@ class MQTTClient:
         row = (await db.execute(stmt)).scalar_one_or_none()
         now = datetime.utcnow()
 
+        previous_alert_level = row.last_alert_level if row else None
+
         if row:
-            # Update existing session
             row.last_seen            = now
             row.reading_count        += 1
             row.last_freshness       = freshness
             row.last_days_remaining  = result.days_remaining
             row.last_alert_level     = result.alert_level.value
         else:
-            # First time this fruit is seen — open a new session
             db.add(FruitSession(
-                device_id           = device_id,
-                fruit_type          = fruit_type,
-                first_seen          = now,
-                last_seen           = now,
-                reading_count       = 1,
-                last_freshness      = freshness,
-                last_days_remaining = result.days_remaining,
-                last_alert_level    = result.alert_level.value,
+                device_id            = device_id,
+                fruit_type            = fruit_type,
+                first_seen            = now,
+                last_seen             = now,
+                reading_count         = 1,
+                last_freshness        = freshness,
+                last_days_remaining   = result.days_remaining,
+                last_alert_level      = result.alert_level.value,
             ))
 
-    async def _send_telegram(self, message: str, alert_level: str):
-        if not self._telegram_bot:
-            return
-        icons = {"warning": "⚠️", "critical": "🚨", "spoiled": "❌"}
-        text  = f"{icons.get(alert_level, '⚠️')} *Fruit Monitor Alert*\n\n{message}"
-        try:
-            await self._telegram_bot.send_message(
-                chat_id=settings.TELEGRAM_CHAT_ID,
-                text=text,
-                parse_mode="Markdown",
-            )
-        except Exception as exc:
-            logger.error("Telegram send failed: %s", exc)
+        return previous_alert_level
