@@ -12,17 +12,46 @@ from sqlalchemy.orm import DeclarativeBase
 from .config import settings
 
 
+from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+
+
 def _normalise_db_url(url: str) -> str:
     """
-    Render provides 'postgresql://...' but SQLAlchemy's async engine
-    needs 'postgresql+asyncpg://...'. Convert if needed.
-    SQLite URLs are left untouched.
+    Convert 'postgresql://' / 'postgres://' -> 'postgresql+asyncpg://'.
+    Also strips 'sslmode' and 'channel_binding' query params — these are
+    libpq-style parameter names (used by Neon, Render, etc. in their
+    connection strings) that asyncpg's connect() does not accept as
+    keyword arguments. SSL is instead enforced explicitly via connect_args
+    below. SQLite URLs are left untouched.
     """
     if url.startswith("postgresql://"):
-        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    if url.startswith("postgres://"):   # some providers use this shorter form
-        return url.replace("postgres://", "postgresql+asyncpg://", 1)
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    elif url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+    else:
+        return url
+
+    parsed = urlparse(url)
+    query  = parse_qs(parsed.query)
+    query.pop("sslmode", None)
+    query.pop("channel_binding", None)
+    url = urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
     return url
+
+
+DATABASE_URL = _normalise_db_url(settings.DATABASE_URL)
+
+_connect_args = {}
+if DATABASE_URL.startswith("sqlite"):
+    _connect_args = {"check_same_thread": False}
+elif DATABASE_URL.startswith("postgresql+asyncpg"):
+    _connect_args = {"ssl": "require"}   # enforce TLS explicitly, asyncpg-style
+
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    connect_args=_connect_args,
+)
 
 
 DATABASE_URL = _normalise_db_url(settings.DATABASE_URL)
