@@ -16,6 +16,7 @@ from .config import settings
 from .database import init_db
 from .mqtt_client import MQTTClient
 from .routes import alerts, export, fruits, inventory, predictions
+from .periodic_alerts import periodic_alerts
 
 
 logging.basicConfig(
@@ -37,8 +38,11 @@ async def lifespan(app: FastAPI):
     mqtt.start()
     app.state.mqtt_client = mqtt
 
+    periodic_alerts.start()
+
     yield
 
+    periodic_alerts.stop()
     # ── Shutdown ─────────────────────────────────────────────
     logger.info("Shutting down...")
     mqtt.stop()
