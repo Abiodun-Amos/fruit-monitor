@@ -29,7 +29,7 @@ from .config import settings
 from .database import AsyncSessionLocal
 from .device_state import device_state
 from .inference import classify_image
-from .models import Alert, FruitReading, FruitSession, Prediction
+from .models import Alert, CameraLastLabel, FruitReading, FruitSession, Prediction
 
 # Absolute imports — works when uvicorn runs from fruit_monitor/
 from spoilage_engine.baselines import is_fresh_label
@@ -134,19 +134,25 @@ class MQTTClient:
     def start(self):
         """Called inside FastAPI lifespan (async context)."""
         self._loop = asyncio.get_running_loop()
+        self._loop.create_task(self._restore_camera_state())
         self._client.connect_async(settings.MQTT_BROKER_HOST, settings.MQTT_BROKER_PORT)
         self._client.loop_start()
         self._worker_task = self._loop.create_task(self._process_queue())
         logger.info("MQTT client started")
 
-    def stop(self):
-        """Called on FastAPI shutdown."""
-        if self._worker_task:
-            self._worker_task.cancel()
-        self._client.loop_stop()
-        self._client.disconnect()
-        logger.info("MQTT client stopped")
-
+    async def _restore_camera_state(self):
+        """On startup, reload the last known camera label so we don't
+        fall back to the hardcoded default just because the backend
+        process restarted."""
+        async with AsyncSessionLocal() as db:
+            try:
+                rows = (await db.execute(sa_select(CameraLastLabel))).scalars().all()
+                for row in rows:
+                    camera_state.update(row.ml_label, row.confidence)
+                    logger.info("Restored camera state → %s (%.2f) from %s",
+                                row.ml_label, row.confidence, row.updated_at)
+            except Exception as exc:
+                logger.warning("Could not restore camera state (fine on first run): %s", exc)
     # ── Async pipeline ────────────────────────────────────────
 
     async def _process_queue(self):
@@ -321,6 +327,28 @@ class MQTTClient:
         camera_state.update(result["ml_label"], result["confidence"])
         logger.info("Camera classified → %s (%.2f)",
                     result["ml_label"], result["confidence"])
+        
+        # Persist so this survives a backend restart
+        async with AsyncSessionLocal() as db:
+            try:
+                stmt = sa_select(CameraLastLabel).where(
+                    CameraLastLabel.device_id == payload.get("device_id", "esp32-cam-01")
+                )
+                row = (await db.execute(stmt)).scalar_one_or_none()
+                if row:
+                    row.ml_label   = result["ml_label"]
+                    row.confidence = result["confidence"]
+                    row.updated_at = datetime.utcnow()
+                else:
+                    db.add(CameraLastLabel(
+                        device_id  = payload.get("device_id", "esp32-cam-01"),
+                        ml_label   = result["ml_label"],
+                        confidence = result["confidence"],
+                    ))
+                await db.commit()
+            except Exception as exc:
+                await db.rollback()
+                logger.error("Failed to persist camera label: %s", exc)
 
     def _handle_status(self, payload: dict):
         device_id = payload.get("device_id", "unknown")

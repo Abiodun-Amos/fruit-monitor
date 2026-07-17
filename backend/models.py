@@ -100,3 +100,19 @@ class FruitSession(Base):
     def __repr__(self):
         return (f"<FruitSession {self.fruit_type} device={self.device_id} "
                 f"active={self.is_active} days={self.last_days_remaining:.1f}>")
+    
+
+class CameraLastLabel(Base):
+    """
+    Persists the most recent CONFIDENT camera classification so it
+    survives backend restarts. Without this, every restart wipes the
+    in-memory camera_state and the pipeline falls back to the
+    DevKitC's hardcoded default label.
+    """
+    __tablename__ = "camera_last_label"
+
+    id: Mapped[int]           = mapped_column(Integer, primary_key=True, autoincrement=True)
+    device_id: Mapped[str]    = mapped_column(String(50), nullable=False, unique=True)
+    ml_label: Mapped[str]     = mapped_column(String(30), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
