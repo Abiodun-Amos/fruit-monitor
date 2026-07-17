@@ -16,7 +16,7 @@ from .config import settings
 from .database import init_db
 from .mqtt_client import MQTTClient
 from .routes import alerts, export, fruits, inventory, predictions
-from .periodic_alerts import periodic_alerts
+from . import periodic_alerts
 
 
 logging.basicConfig(
