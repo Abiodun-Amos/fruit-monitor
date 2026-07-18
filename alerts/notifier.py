@@ -42,7 +42,7 @@ class AlertNotifier:
     # ── Setup ─────────────────────────────────────────────────
 
     def _init_telegram(self):
-        if self._s.TELEGRAM_BOT_TOKEN and self._s.TELEGRAM_CHAT_ID:
+        if self._s.TELEGRAM_BOT_TOKEN and self._s.TELEGRAM_CHAT_IDS:
             try:
                 from telegram import Bot
                 self._telegram_bot = Bot(token=self._s.TELEGRAM_BOT_TOKEN)
@@ -59,13 +59,12 @@ class AlertNotifier:
         fruit_name:     str   = "",
         days_remaining: float = 0.0,
     ):
-        """
-        Fire alerts on all configured channels simultaneously.
-        Exceptions in one channel do not affect the other.
-        """
         await asyncio.gather(
             self._telegram(message, alert_level),
-            self._email(message, alert_level, fruit_name, days_remaining),
+            self._email(message, alert_level, fruit_name, days_remaining,
+                        self._s.RESEND_API_KEY, self._s.EMAIL_TO),
+            self._email(message, alert_level, fruit_name, days_remaining,
+                        self._s.RESEND_API_KEY_2, self._s.EMAIL_TO_2),
             return_exceptions=True,
         )
 
@@ -94,8 +93,10 @@ class AlertNotifier:
         alert_level:    str,
         fruit_name:     str,
         days_remaining: float,
+        api_key:        str,
+        email_to:       str,
     ):
-        if not (self._s.RESEND_API_KEY and self._s.EMAIL_TO):
+        if not (api_key and email_to):
             return
 
         icon    = _LEVEL_ICON.get(alert_level, "⚠️")
@@ -129,18 +130,18 @@ class AlertNotifier:
                 resp = await client.post(
                     "https://api.resend.com/emails",
                     headers={
-                        "Authorization": f"Bearer {self._s.RESEND_API_KEY}",
+                        "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",
                     },
                     json={
                         "from": "Fruit Monitor <onboarding@resend.dev>",
-                        "to": [self._s.EMAIL_TO],
+                        "to": [email_to],
                         "subject": subject,
                         "html": html,
                         "text": message,
                     },
                 )
                 resp.raise_for_status()
-            logger.info("Email alert sent → %s (%s)", self._s.EMAIL_TO, alert_level)
+            logger.info("Email alert sent → %s (%s)", email_to, alert_level)
         except Exception as exc:
-            logger.error("Email send failed: %s", exc)
+            logger.error("Email send failed for %s: %s", email_to, exc)

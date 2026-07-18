@@ -34,9 +34,11 @@ class Settings:
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_IDS:  str = os.getenv("TELEGRAM_CHAT_IDS", os.getenv("TELEGRAM_CHAT_ID", ""))
     RESEND_API_KEY:     str = os.getenv("RESEND_API_KEY",     "")
+    RESEND_API_KEY_2: str = os.getenv("RESEND_API_KEY_2", "")
 
     EMAIL_FROM:         str = os.getenv("EMAIL_FROM",         "")
     EMAIL_TO:           str = os.getenv("EMAIL_TO",           "")
+    EMAIL_TO_2:         str = os.getenv("EMAIL_TO_2",         "")
     EMAIL_APP_PASSWORD: str = os.getenv("EMAIL_APP_PASSWORD", "")
 
     # ── Spoilage Thresholds ───────────────────────────────────────
