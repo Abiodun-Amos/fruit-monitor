@@ -74,21 +74,17 @@ class AlertNotifier:
     async def _telegram(self, message: str, alert_level: str):
         if not self._telegram_bot:
             return
+        chat_ids = [c.strip() for c in self._s.TELEGRAM_CHAT_IDS.split(",") if c.strip()]
+        if not chat_ids:
+            return
         icon = _LEVEL_ICON.get(alert_level, "⚠️")
-        text = (
-            f"{icon} *Fruit Monitor Alert*\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"{message}"
-        )
-        try:
-            await self._telegram_bot.send_message(
-                chat_id    = self._s.TELEGRAM_CHAT_ID,
-                text       = text,
-                parse_mode = "Markdown",
-            )
-            logger.info("Telegram alert sent (%s)", alert_level)
-        except Exception as exc:
-            logger.error("Telegram send failed: %s", exc)
+        text = f"{icon} *Fruit Monitor Alert*\n━━━━━━━━━━━━━━━━━━━━\n{message}"
+        for chat_id in chat_ids:
+            try:
+                await self._telegram_bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+                logger.info("Telegram alert sent to %s (%s)", chat_id, alert_level)
+            except Exception as exc:
+                logger.error("Telegram send failed for %s: %s", chat_id, exc)
 
     # ── Email ─────────────────────────────────────────────────
 
