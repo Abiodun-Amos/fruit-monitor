@@ -317,7 +317,7 @@ class MQTTClient:
             logger.error("Camera inference failed: %s", exc)
             return
 
-        MIN_CONFIDENCE = 0.30   # tune this once you have real fruit test data
+        MIN_CONFIDENCE = 0.00   # tune this once you have real fruit test data
 
         if result["confidence"] < MIN_CONFIDENCE:
             logger.info("Low-confidence camera result ignored → %s (%.2f)",
