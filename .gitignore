@@ -19,7 +19,7 @@ env/
 *.sqlite3
 
 # Models (large files — store separately)
-*.tflite
+# *.tflite
 *.keras
 *.h5
 
