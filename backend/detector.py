@@ -50,7 +50,12 @@ def _load():
     with open(_DETECTOR_CLASSES) as f:
         _class_map = json.load(f)
 
-    logger.info("Detector loaded. Classes: %d", len(_class_map))
+    logger.info(
+        "Detector loaded. Input shape=%s dtype=%s | Output shape=%s dtype=%s | classes=%d",
+        _input_details[0]["shape"], _input_details[0]["dtype"],
+        _output_details[0]["shape"], _output_details[0]["dtype"],
+        len(_class_map),
+    )
 
 
 def detect_fruits(image_bytes: bytes) -> list:
@@ -65,28 +70,50 @@ def detect_fruits(image_bytes: bytes) -> list:
     img = Image.open(__import__("io").BytesIO(image_bytes)).convert("RGB")
     orig_w, orig_h = img.size
     resized = img.resize(DET_IMG_SIZE)
-    arr = np.asarray(resized).astype(np.float32) / 255.0
-    arr = np.expand_dims(arr, axis=0)
+    arr = np.asarray(resized).astype(np.float32) / 255.0   # (H, W, 3), always this shape from PIL
+
+    # Adapt to whatever layout THIS export actually expects, rather than
+    # assuming — dimension index 1 tells us channels-first vs channels-last.
+    input_shape = _input_details[0]["shape"]
+    if input_shape[1] == 3:
+        arr = arr.transpose(2, 0, 1)     # (H,W,3) -> (3,H,W)  channels-first
+    # else: already (H,W,3) channels-last — no change needed
+
+    arr = np.expand_dims(arr, axis=0)    # add batch dim
 
     in_dtype = _input_details[0]["dtype"]
     if in_dtype in (np.uint8, np.int8):
         scale, zero_point = _input_details[0]["quantization"]
         arr = (arr / scale + zero_point).astype(in_dtype) if scale else arr.astype(in_dtype)
+    else:
+        arr = arr.astype(in_dtype)
 
     _interpreter.set_tensor(_input_details[0]["index"], arr)
     _interpreter.invoke()
-    output = _interpreter.get_tensor(_output_details[0]["index"])[0]  # (84, 8400)-ish, YOLOv8 export layout
+    output = _interpreter.get_tensor(_output_details[0]["index"])[0]
 
     out_dtype = _output_details[0]["dtype"]
     if out_dtype in (np.uint8, np.int8):
         o_scale, o_zero = _output_details[0]["quantization"]
         output = (output.astype(np.float32) - o_zero) * o_scale
 
-    boxes = output[:4, :].T          # cx, cy, w, h  (normalised 0-1)
-    scores = output[4:, :].T         # per-class confidence, one row per box
+    num_classes = len(_class_map)
+    expected_channels = 4 + num_classes
 
-    detections = []
-    class_ids = np.argmax(scores, axis=1)
+    if output.shape[0] == expected_channels:
+        boxes  = output[:4, :].T
+        scores = output[4:, :].T
+    elif len(output.shape) > 1 and output.shape[1] == expected_channels:
+        boxes  = output[:, :4]
+        scores = output[:, 4:]
+    else:
+        logger.error(
+            "Unexpected detector output shape %s — expected a %d-channel axis (4 box + %d classes)",
+            output.shape, expected_channels, num_classes,
+        )
+        return []
+
+    class_ids   = np.argmax(scores, axis=1)
     confidences = np.max(scores, axis=1)
 
     keep = confidences >= CONF_THRESHOLD
@@ -95,7 +122,6 @@ def detect_fruits(image_bytes: bytes) -> list:
     if len(boxes) == 0:
         return []
 
-    # Convert cx,cy,w,h (normalised) -> x1,y1,x2,y2 (pixel, original image)
     x1 = (boxes[:, 0] - boxes[:, 2] / 2) * orig_w
     y1 = (boxes[:, 1] - boxes[:, 3] / 2) * orig_h
     x2 = (boxes[:, 0] + boxes[:, 2] / 2) * orig_w
@@ -104,6 +130,7 @@ def detect_fruits(image_bytes: bytes) -> list:
 
     keep_idx = _nms(px_boxes, confidences, IOU_THRESHOLD)
 
+    detections = []
     for i in keep_idx:
         detections.append({
             "fruit_type": _class_map[str(int(class_ids[i]))],
@@ -124,7 +151,6 @@ def crop_box(image_bytes: bytes, box: tuple) -> bytes:
 
 
 def _nms(boxes: np.ndarray, scores: np.ndarray, iou_threshold: float) -> list:
-    """Standard non-max suppression — same box for the same fruit doesn't get kept twice."""
     if len(boxes) == 0:
         return []
     x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
