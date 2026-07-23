@@ -93,4 +93,23 @@ async def infer(file: UploadFile = File(...)):
         logging.getLogger(__name__).exception("Inference failed")
         return {"error": str(exc)}
 
+@app.post("/api/infer-multi", tags=["Inference"])
+async def infer_multi(file: UploadFile = File(...)):
+    """Test endpoint: run the full detect -> crop -> classify pipeline on an uploaded image."""
+    from .detector import detect_fruits, crop_box
+    from .inference import classify_image
+    image_bytes = await file.read()
+    try:
+        boxes = detect_fruits(image_bytes)
+        results = []
+        for box in boxes:
+            crop = crop_box(image_bytes, box["box"])
+            classified = classify_image(crop)
+            results.append({"detector_said": box["fruit_type"],
+                            "classifier_said": classified["ml_label"],
+                            "confidence": classified["confidence"]})
+        return {"fruit_count": len(boxes), "results": results}
+    except Exception as exc:
+        return {"error": str(exc)}
+
 app.mount("/dashboard", StaticFiles(directory="dashboard", html=True), name="dashboard")
