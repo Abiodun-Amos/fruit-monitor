@@ -1,7 +1,7 @@
 """
 database.py
 Async SQLAlchemy engine, session factory, and base class.
-Auto-detects SQLite (local) vs PostgreSQL (Render) from DATABASE_URL.
+Auto-detects SQLite (local) vs PostgreSQL (Neon/Render/etc.) from DATABASE_URL.
 """
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -53,20 +53,6 @@ engine = create_async_engine(
     connect_args=_connect_args,
 )
 
-
-DATABASE_URL = _normalise_db_url(settings.DATABASE_URL)
-
-# SQLite needs check_same_thread=False; Postgres does not accept it.
-_connect_args = {}
-if DATABASE_URL.startswith("sqlite"):
-    _connect_args = {"check_same_thread": False}
-
-engine = create_async_engine(
-    DATABASE_URL,
-    echo=False,
-    connect_args=_connect_args,
-)
-
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
     class_=AsyncSession,
@@ -77,17 +63,6 @@ AsyncSessionLocal = async_sessionmaker(
 class Base(DeclarativeBase):
     """Every ORM model inherits from this."""
     pass
-
-# AsyncSessionLocal = async_sessionmaker(
-#     bind=engine,
-#     class_=AsyncSession,
-#     expire_on_commit=False,   # keeps ORM objects usable after commit
-# )
-
-
-# class Base(DeclarativeBase):
-#     """Every ORM model inherits from this."""
-#     pass
 
 
 async def get_db():

@@ -7,7 +7,7 @@ predictions     — spoilage engine output (one per reading)
 alerts          — every notification dispatched
 """
 from datetime import datetime
-from sqlalchemy import Boolean, Float, Integer, String, DateTime, ForeignKey, Text
+from sqlalchemy import Boolean, Float, Integer, String, DateTime, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
 
@@ -104,15 +104,19 @@ class FruitSession(Base):
 
 class CameraLastLabel(Base):
     """
-    Persists the most recent CONFIDENT camera classification so it
-    survives backend restarts. Without this, every restart wipes the
-    in-memory camera_state and the pipeline falls back to the
-    DevKitC's hardcoded default label.
+    Persists the most recent CONFIRMED camera classification per
+    (device, fruit type) pair, so it survives backend restarts.
+    One row per fruit currently believed to be in the box — not one
+    row per device anymore, since there can be several at once.
     """
     __tablename__ = "camera_last_label"
+    __table_args__ = (
+        UniqueConstraint("device_id", "fruit_type", name="uq_camera_label_device_fruit"),
+    )
 
-    id: Mapped[int]           = mapped_column(Integer, primary_key=True, autoincrement=True)
-    device_id: Mapped[str]    = mapped_column(String(50), nullable=False, unique=True)
-    ml_label: Mapped[str]     = mapped_column(String(30), nullable=False)
-    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    id: Mapped[int]              = mapped_column(Integer, primary_key=True, autoincrement=True)
+    device_id: Mapped[str]       = mapped_column(String(50), nullable=False)
+    fruit_type: Mapped[str]      = mapped_column(String(50), nullable=False)
+    ml_label: Mapped[str]        = mapped_column(String(30), nullable=False)
+    confidence: Mapped[float]    = mapped_column(Float, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)

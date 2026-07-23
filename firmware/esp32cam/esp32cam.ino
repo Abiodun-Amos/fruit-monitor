@@ -31,7 +31,7 @@
 #define DEVICE_ID    "esp32-cam-01"
 
 // ── Capture interval ──────────────────────────────────────────
-#define INTERVAL_MS  300000UL   // 5 minutes
+#define INTERVAL_MS  30000UL
 
 // ── AI Thinker ESP32-CAM pin map ──────────────────────────────
 #define PWDN_GPIO_NUM     32

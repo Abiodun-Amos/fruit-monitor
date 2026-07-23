@@ -1,18 +1,7 @@
 """
 mqtt_client.py
-Subscribes to HiveMQ Cloud (TLS), runs the spoilage engine on
-every incoming reading, saves to DB, and dispatches alerts.
-
-Expected MQTT payload from ESP32 (topic: fruit/sensor/data):
-{
-    "device_id":  "esp32-s3-01",
-    "ml_label":   "freshbanana",   <- full class-map label
-    "confidence": 0.97,
-    "temperature": 25.5,           <- °C
-    "humidity":   65.2,            <- %RH
-    "gas_raw":    1500,            <- MQ-135 ADC value (0-4095)
-    "ts":         1718187600       <- Unix timestamp (optional)
-}
+Subscribes to HiveMQ Cloud (TLS), runs the spoilage engine once per
+CONFIRMED fruit in view, saves to DB, and dispatches alerts.
 """
 import asyncio
 import json
@@ -27,11 +16,11 @@ from sqlalchemy import and_, select as sa_select
 from .camera_state import camera_state
 from .config import settings
 from .database import AsyncSessionLocal
+from .detector import detect_fruits, crop_box
 from .device_state import device_state
 from .inference import classify_image
 from .models import Alert, CameraLastLabel, FruitReading, FruitSession, Prediction
 
-# Absolute imports — works when uvicorn runs from fruit_monitor/
 from spoilage_engine.baselines import is_fresh_label
 from spoilage_engine.engine import (
     SensorReading as EngineSensorReading,
@@ -41,53 +30,37 @@ from alerts.notifier import AlertNotifier
 
 logger = logging.getLogger(__name__)
 
-# ── Constants ─────────────────────────────────────────────────
 GAS_ADC_MAX = 4095.0
+MIN_CLASSIFY_CONFIDENCE = 0.70   # per-crop classification confidence floor
 
-# One shared predictor — stateless, safe to reuse across messages
 _predictor = SpoilagePredictor(
     warning_days=settings.ALERT_DAYS_THRESHOLD,
     critical_days=settings.CRITICAL_DAYS_THRESHOLD,
 )
 
 
-# ── Helpers ───────────────────────────────────────────────────
-
 def _normalise_gas(raw: float) -> float:
-    """MQ-135 raw ADC (0–4095) → 0.0–1.0."""
     return max(0.0, min(float(raw) / GAS_ADC_MAX, 1.0))
 
 
 def _parse_ml_label(ml_label: str):
-    """
-    'freshbanana' → ('banana', 'fresh')
-    'rottenguava' → ('guava',  'rotten')
-    """
     label = ml_label.lower().strip()
     fruit_type = label.replace("fresh", "").replace("rotten", "")
     freshness  = "fresh" if is_fresh_label(label) else "rotten"
     return fruit_type, freshness
 
 
-# ── MQTT Client ───────────────────────────────────────────────
-
 class MQTTClient:
-    """
-    Paho-mqtt wrapped with an asyncio queue so the MQTT thread
-    and FastAPI's event loop never conflict.
-    """
 
     def __init__(self):
         self._client = mqtt.Client(client_id="fruit-monitor-backend", clean_session=True)
-        self._queue: asyncio.Queue        = asyncio.Queue()
+        self._queue: asyncio.Queue = asyncio.Queue()
         self._loop:  asyncio.AbstractEventLoop | None = None
-        self._worker_task: asyncio.Task   | None = None
+        self._worker_task: asyncio.Task | None = None
         self._notifier = AlertNotifier(settings)
 
         self._configure_tls()
         self._bind_callbacks()
-
-    # ── Setup ─────────────────────────────────────────────────
 
     def _configure_tls(self):
         ctx = ssl.create_default_context()
@@ -99,17 +72,13 @@ class MQTTClient:
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message    = self._on_message
 
-    # ── Paho callbacks (paho's thread) ────────────────────────
-
     def _on_connect(self, client, userdata, flags, rc):
         if rc == 0:
             logger.info("MQTT connected → %s", settings.MQTT_BROKER_HOST)
             client.subscribe(settings.MQTT_TOPIC_SENSOR, qos=1)
-            logger.info("Subscribed to %s", settings.MQTT_TOPIC_SENSOR)
             client.subscribe(settings.MQTT_TOPIC_CAMERA, qos=1)
-            logger.info("Subscribed to %s", settings.MQTT_TOPIC_CAMERA)
             client.subscribe(settings.MQTT_TOPIC_DEVICE_STATUS, qos=1)
-            logger.info("Subscribed to %s", settings.MQTT_TOPIC_DEVICE_STATUS)
+            logger.info("Subscribed to sensor/camera/status topics")
         else:
             logger.error("MQTT connection refused (rc=%d). Check credentials.", rc)
 
@@ -118,21 +87,16 @@ class MQTTClient:
             logger.warning("MQTT disconnected unexpectedly (rc=%d)", rc)
 
     def _on_message(self, client, userdata, msg):
-        """Decode JSON and route to the async queue with topic context."""
         try:
             payload = json.loads(msg.payload.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             logger.error("Bad payload on %s: %s", msg.topic, exc)
             return
-
         envelope = {"topic": msg.topic, "payload": payload}
         if self._loop and not self._loop.is_closed():
             asyncio.run_coroutine_threadsafe(self._queue.put(envelope), self._loop)
 
-    # ── Lifecycle ─────────────────────────────────────────────
-
     def start(self):
-        """Called inside FastAPI lifespan (async context)."""
         self._loop = asyncio.get_running_loop()
         self._loop.create_task(self._restore_camera_state())
         self._client.connect_async(settings.MQTT_BROKER_HOST, settings.MQTT_BROKER_PORT)
@@ -141,22 +105,17 @@ class MQTTClient:
         logger.info("MQTT client started")
 
     async def _restore_camera_state(self):
-        """On startup, reload the last known camera label so we don't
-        fall back to the hardcoded default just because the backend
-        process restarted."""
         async with AsyncSessionLocal() as db:
             try:
                 rows = (await db.execute(sa_select(CameraLastLabel))).scalars().all()
                 for row in rows:
-                    camera_state.update(row.ml_label, row.confidence)
+                    camera_state.restore(row.fruit_type, row.ml_label, row.confidence, row.updated_at)
                     logger.info("Restored camera state → %s (%.2f) from %s",
                                 row.ml_label, row.confidence, row.updated_at)
             except Exception as exc:
                 logger.warning("Could not restore camera state (fine on first run): %s", exc)
-    # ── Async pipeline ────────────────────────────────────────
 
     async def _process_queue(self):
-        """Drain the queue, routing EACH message to exactly ONE handler."""
         while True:
             try:
                 envelope = await self._queue.get()
@@ -177,29 +136,37 @@ class MQTTClient:
                 logger.exception("Queue processor error: %s", exc)
 
     async def _handle_message(self, payload: dict):
-        """validate → normalise → engine → DB → publish → alert."""
-
-        # ── 1. Validate ───────────────────────────────────────
+        """validate → one full prediction cycle PER currently-confirmed fruit."""
         required = {"device_id", "ml_label", "confidence", "temperature", "humidity", "gas_raw"}
         missing  = required - set(payload.keys())
         if missing:
             logger.warning("Dropping message — missing fields: %s", missing)
             return
 
-        # ── 2. Parse & normalise ──────────────────────────────
-        # Option A: prefer the latest camera classification if available;
-        # fall back to the device's own label (useful before camera is live)
-        cam_label, cam_conf = camera_state.get()
-        if cam_label:
-            ml_label      = cam_label
-            ml_confidence = cam_conf
-        else:
-            ml_label      = str(payload["ml_label"])
-            ml_confidence = float(payload["confidence"])
+        gas_raw        = float(payload["gas_raw"])
+        gas_normalised = _normalise_gas(gas_raw)
 
+        # Option A: use every currently-confirmed camera detection. Falls
+        # back to the device's own self-reported label only when the
+        # camera hasn't confirmed anything yet at all (e.g. fresh boot).
+        slots = camera_state.get_all()
+        if not slots:
+            fallback_type, _ = _parse_ml_label(str(payload["ml_label"]))
+            slots = [{
+                "fruit_type": fallback_type,
+                "ml_label":   str(payload["ml_label"]),
+                "confidence": float(payload["confidence"]),
+            }]
+
+        for slot in slots:
+            await self._process_one_fruit(payload, slot, gas_raw, gas_normalised)
+
+    async def _process_one_fruit(self, payload: dict, slot: dict, gas_raw: float, gas_normalised: float):
+        """Full engine -> DB -> publish -> alert cycle for ONE fruit slot."""
+        ml_label      = slot["ml_label"]
+        ml_confidence = slot["confidence"]
         fruit_type, freshness = _parse_ml_label(ml_label)
-        gas_raw               = float(payload["gas_raw"])
-        gas_normalised        = _normalise_gas(gas_raw)
+        device_id = str(payload["device_id"])
 
         try:
             engine_reading = EngineSensorReading(
@@ -214,7 +181,6 @@ class MQTTClient:
             logger.error("Invalid SensorReading values: %s | payload=%s", exc, payload)
             return
 
-        # ── 3. Run spoilage engine ────────────────────────────
         try:
             result = _predictor.predict(engine_reading)
         except Exception as exc:
@@ -223,26 +189,25 @@ class MQTTClient:
 
         logger.info(
             "[%s] %s/%s → %.1f days | %s | conf=%.2f",
-            payload["device_id"], fruit_type, freshness,
+            device_id, fruit_type, freshness,
             result.days_remaining, result.alert_level.value, result.confidence,
         )
 
-        # ── 4. Persist to DB (and work out alert-worthiness) ──
         needs_alert = False
         async with AsyncSessionLocal() as db:
             try:
                 reading_row = FruitReading(
-                    device_id       = str(payload["device_id"]),
+                    device_id       = device_id,
                     fruit_type      = fruit_type,
                     freshness_label = freshness,
-                    ml_confidence   = float(payload["confidence"]),
+                    ml_confidence   = ml_confidence,
                     temperature     = float(payload["temperature"]),
                     humidity        = float(payload["humidity"]),
                     gas_level       = gas_raw,
                     received_at     = datetime.utcnow(),
                 )
                 db.add(reading_row)
-                await db.flush()      # get reading_row.id without committing
+                await db.flush()
 
                 db.add(Prediction(
                     reading_id        = reading_row.id,
@@ -252,14 +217,9 @@ class MQTTClient:
                     engine_confidence = result.confidence,
                 ))
 
-                # previous_alert_level is the state BEFORE this reading —
-                # None if this is a brand new session
                 previous_alert_level = await self._upsert_session(
-                    db, str(payload["device_id"]), fruit_type, freshness, result
+                    db, device_id, fruit_type, freshness, result
                 )
-
-                # Alert on ANY state change (including into "ok") — but
-                # never repeat the same state twice in a row
                 needs_alert = result.alert_level.value != previous_alert_level
 
                 if needs_alert:
@@ -270,16 +230,13 @@ class MQTTClient:
                     ))
 
                 await db.commit()
-
             except Exception as exc:
                 await db.rollback()
-                logger.exception("DB write failed: %s", exc)
-                return   # don't send downstream notifications if DB failed
+                logger.exception("DB write failed for %s: %s", fruit_type, exc)
+                return
 
-        # ── 5. Publish prediction back to MQTT ────────────────
-        self._publish_prediction(result, payload["device_id"])
+        self._publish_prediction(result, device_id)
 
-        # ── 6. Send alerts (Telegram + Email) ─────────────────
         if needs_alert:
             await self._notifier.send(
                 message        = result.message,
@@ -290,9 +247,9 @@ class MQTTClient:
 
     async def _handle_camera(self, payload: dict):
         """
-        Camera message: { "device_id": "...", "image_url": "https://..." }
-        Download the image, run inference, cache the result for the
-        sensor pipeline to use (Option A).
+        Downloads the frame, detects EVERY fruit in it, classifies each
+        detected crop independently, and feeds the confirmed set to
+        camera_state — one slot per fruit type, not one shared value.
         """
         image_url = payload.get("image_url")
         if not image_url:
@@ -310,53 +267,88 @@ class MQTTClient:
             logger.error("Failed to download camera image: %s", exc)
             return
 
+        loop = asyncio.get_running_loop()
+
         try:
-            loop   = asyncio.get_running_loop()
-            result = await loop.run_in_executor(None, classify_image, image_bytes)
+            boxes = await loop.run_in_executor(None, detect_fruits, image_bytes)
         except Exception as exc:
-            logger.error("Camera inference failed: %s", exc)
+            logger.error("Fruit detection failed: %s", exc)
             return
 
-        MIN_CONFIDENCE = 0.00   # tune this once you have real fruit test data
-
-        if result["confidence"] < MIN_CONFIDENCE:
-            logger.info("Low-confidence camera result ignored → %s (%.2f)",
-                        result["ml_label"], result["confidence"])
+        if not boxes:
+            logger.info("No fruit detected in frame")
             return
 
-        camera_state.update(result["ml_label"], result["confidence"])
-        logger.info("Camera classified → %s (%.2f)",
-                    result["ml_label"], result["confidence"])
-        
-        # Persist so this survives a backend restart
+        logger.info("Detector found %d fruit(s) in frame", len(boxes))
+
+        device_id = payload.get("device_id", "esp32-cam-01")
+        confirmed_detections = []
+
+        for box in boxes:
+            try:
+                crop_bytes = crop_box(image_bytes, box["box"])
+                result = await loop.run_in_executor(None, classify_image, crop_bytes)
+            except Exception as exc:
+                logger.error("Crop classification failed for %s: %s", box["fruit_type"], exc)
+                continue
+
+            if result["confidence"] < MIN_CLASSIFY_CONFIDENCE:
+                logger.info("Low-confidence crop ignored → %s (%.2f)",
+                            result["ml_label"], result["confidence"])
+                continue
+
+            detected_fruit_type, _ = _parse_ml_label(result["ml_label"])
+            if detected_fruit_type != box["fruit_type"]:
+                logger.info(
+                    "Detector/classifier disagree: detector=%s classifier=%s — using classifier",
+                    box["fruit_type"], detected_fruit_type,
+                )
+
+            confirmed_detections.append({
+                "fruit_type": detected_fruit_type,
+                "ml_label":   result["ml_label"],
+                "confidence": result["confidence"],
+            })
+
+        if not confirmed_detections:
+            logger.info("All detections fell below classification confidence — nothing confirmed")
+            return
+
+        camera_state.update(confirmed_detections)
+        logger.info("Camera state updated: %s",
+                    ", ".join(d["ml_label"] for d in confirmed_detections))
+
         async with AsyncSessionLocal() as db:
             try:
-                stmt = sa_select(CameraLastLabel).where(
-                    CameraLastLabel.device_id == payload.get("device_id", "esp32-cam-01")
-                )
-                row = (await db.execute(stmt)).scalar_one_or_none()
-                if row:
-                    row.ml_label   = result["ml_label"]
-                    row.confidence = result["confidence"]
-                    row.updated_at = datetime.utcnow()
-                else:
-                    db.add(CameraLastLabel(
-                        device_id  = payload.get("device_id", "esp32-cam-01"),
-                        ml_label   = result["ml_label"],
-                        confidence = result["confidence"],
-                    ))
+                for det in confirmed_detections:
+                    stmt = sa_select(CameraLastLabel).where(
+                        and_(
+                            CameraLastLabel.device_id  == device_id,
+                            CameraLastLabel.fruit_type == det["fruit_type"],
+                        )
+                    )
+                    row = (await db.execute(stmt)).scalar_one_or_none()
+                    if row:
+                        row.ml_label   = det["ml_label"]
+                        row.confidence = det["confidence"]
+                        row.updated_at = datetime.utcnow()
+                    else:
+                        db.add(CameraLastLabel(
+                            device_id  = device_id,
+                            fruit_type = det["fruit_type"],
+                            ml_label   = det["ml_label"],
+                            confidence = det["confidence"],
+                        ))
                 await db.commit()
             except Exception as exc:
                 await db.rollback()
-                logger.error("Failed to persist camera label: %s", exc)
+                logger.error("Failed to persist camera labels: %s", exc)
 
     def _handle_status(self, payload: dict):
         device_id = payload.get("device_id", "unknown")
         status    = payload.get("status", "unknown")
         device_state.update(device_id, status)
         logger.info("Device %s status → %s", device_id, status)
-
-    # ── Outbound ──────────────────────────────────────────────
 
     def _publish_prediction(self, result, device_id: str):
         try:
@@ -371,12 +363,6 @@ class MQTTClient:
             logger.error("Prediction publish failed: %s", exc)
 
     async def _upsert_session(self, db, device_id: str, fruit_type: str, freshness: str, result) -> str | None:
-        """
-        Create or update the FruitSession row for this device + fruit
-        combination. Returns the PREVIOUS alert_level (None for a brand
-        new session) so the caller can tell whether this reading is a
-        genuinely NEW state, not a repeat of the last one.
-        """
         stmt = sa_select(FruitSession).where(
             and_(
                 FruitSession.device_id  == device_id,
@@ -386,25 +372,24 @@ class MQTTClient:
         )
         row = (await db.execute(stmt)).scalar_one_or_none()
         now = datetime.utcnow()
-
         previous_alert_level = row.last_alert_level if row else None
 
         if row:
-            row.last_seen            = now
-            row.reading_count        += 1
-            row.last_freshness       = freshness
-            row.last_days_remaining  = result.days_remaining
-            row.last_alert_level     = result.alert_level.value
+            row.last_seen           = now
+            row.reading_count       += 1
+            row.last_freshness      = freshness
+            row.last_days_remaining = result.days_remaining
+            row.last_alert_level    = result.alert_level.value
         else:
             db.add(FruitSession(
-                device_id            = device_id,
-                fruit_type            = fruit_type,
-                first_seen            = now,
-                last_seen             = now,
-                reading_count         = 1,
-                last_freshness        = freshness,
-                last_days_remaining   = result.days_remaining,
-                last_alert_level      = result.alert_level.value,
+                device_id           = device_id,
+                fruit_type          = fruit_type,
+                first_seen          = now,
+                last_seen           = now,
+                reading_count       = 1,
+                last_freshness      = freshness,
+                last_days_remaining = result.days_remaining,
+                last_alert_level    = result.alert_level.value,
             ))
 
         return previous_alert_level

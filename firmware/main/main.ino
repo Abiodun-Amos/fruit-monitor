@@ -15,13 +15,15 @@
 #define MQTT_PORT    8883
 #define MQTT_USER    "fruitmonitor"
 #define MQTT_PASS    "Fruitmonitor01"
-#define MQTT_TOPIC   "fruit/sensor/data"
+#define MQTT_TOPIC_PUB    "fruit/sensor/data"
+#define MQTT_TOPIC_SUB    "fruit/prediction/result"   // backend echoes the resolved label here
 #define DEVICE_ID    "esp32-devkit-01"
 
 // ── Sensors ───────────────────────────────────────────────────
 #define DHT_PIN      4       // GPIO4  — DHT22 data
 #define DHT_TYPE     DHT22
 #define MQ135_PIN    34      // GPIO34 — MQ-135 AO (via voltage divider)
+
 // ── Button / pause-resume state ───────────────────────────────
 #define BUTTON_PIN   13      // GPIO13 — pause/resume push button
 #define DEBOUNCE_MS  300
@@ -33,19 +35,28 @@ unsigned long lastButtonPress  = 0;
 // ── Publish interval ──────────────────────────────────────────
 #define INTERVAL_MS  30000UL   // 30 seconds
 
-// ── Fruit label ───────────────────────────────────────────────
-// Change this to the fruit you are physically testing with.
-// Options: freshapple, freshbanana, freshorange,
-//          freshguava, freshtomato, freshgrape, freshstrawberry
-// (prefix with "rotten" for spoiled fruit)
-String fruitLabel      = "freshbanana";
-float  fruitConfidence = 0.95f;
+// ── Autonomous fruit label ──────────────────────────────────────
+// No camera on this board, so it cannot know the fruit type itself.
+// Instead it listens on MQTT_TOPIC_SUB for the backend's own resolved
+// classification (sourced from the ESP32-CAM) and republishes THAT
+// on its next reading — no manual editing or re-flashing required.
+//
+// knownFruitLabel/knownConfidence below are ONLY ever used for the
+// handful of seconds between boot and the first echo received; once
+// even one prediction has come back, they always reflect real data.
+String fruitLabel      = "freshapple";   // bootstrap-only placeholder
+float  fruitConfidence = 0.50f;          // bootstrap-only placeholder
+bool   haveRealLabel    = false;         // true once an echo has arrived
 
 // ── Objects ───────────────────────────────────────────────────
 DHT              dht(DHT_PIN, DHT_TYPE);
 WiFiClientSecure wifiClient;
 PubSubClient     mqtt(wifiClient);
 unsigned long    lastPublish = 0;
+
+// ── Forward declarations ───────────────────────────────────────
+void publishStatus(const char* status);
+void onMqttMessage(char* topic, byte* payload, unsigned int length);
 
 // ─────────────────────────────────────────────────────────────
 
@@ -65,6 +76,8 @@ void connectMQTT() {
         Serial.print("Connecting to MQTT...");
         if (mqtt.connect(DEVICE_ID, MQTT_USER, MQTT_PASS)) {
             Serial.println(" connected");
+            mqtt.subscribe(MQTT_TOPIC_SUB);
+            Serial.printf("Subscribed to %s\n", MQTT_TOPIC_SUB);
         } else {
             Serial.printf(" rc=%d  retry in 5s\n", mqtt.state());
             delay(5000);
@@ -82,6 +95,29 @@ void syncTime() {
         tries++;
     }
     Serial.println(" done");
+}
+
+// ── Receives the backend's resolved prediction and adopts its label ──
+void onMqttMessage(char* topic, byte* payload, unsigned int length) {
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, payload, length);
+    if (err) {
+        Serial.printf("Prediction echo: JSON parse failed (%s)\n", err.c_str());
+        return;
+    }
+
+    // Only adopt echoes that came from THIS device's own readings
+    const char* echoedDevice = doc["device_id"] | "";
+    if (strcmp(echoedDevice, DEVICE_ID) != 0) return;
+
+    const char* mlLabel = doc["ml_label"] | "";
+    if (strlen(mlLabel) == 0) return;
+
+    fruitLabel      = String(mlLabel);
+    fruitConfidence = doc["confidence"] | fruitConfidence;
+    haveRealLabel   = true;
+
+    Serial.printf("Adopted label from backend -> %s\n", fruitLabel.c_str());
 }
 
 void readAndPublish() {
@@ -111,9 +147,11 @@ void readAndPublish() {
     serializeJson(doc, buf);
 
     // ── Publish ───────────────────────────────────────────────
-    if (mqtt.publish(MQTT_TOPIC, buf)) {
-        Serial.printf("Sent: %s  temp=%.1fC  hum=%.1f%%  gas=%d\n",
-                      fruitLabel.c_str(), temp, hum, gasRaw);
+    if (mqtt.publish(MQTT_TOPIC_PUB, buf)) {
+        Serial.printf("Sent: %s (%s)  temp=%.1fC  hum=%.1f%%  gas=%d\n",
+                      fruitLabel.c_str(),
+                      haveRealLabel ? "confirmed" : "bootstrap",
+                      temp, hum, gasRaw);
     } else {
         Serial.println("Publish failed - will retry next cycle");
     }
@@ -135,7 +173,8 @@ void setup() {
 
     wifiClient.setInsecure();   // skip TLS cert check (fine for project)
     mqtt.setServer(MQTT_HOST, MQTT_PORT);
-    mqtt.setBufferSize(512);
+    mqtt.setCallback(onMqttMessage);
+    mqtt.setBufferSize(1024);   // prediction echoes carry many fields — 256 was too small to receive them
 
     connectMQTT();
     publishStatus("resumed");   // system starts active
@@ -144,13 +183,8 @@ void setup() {
     readAndPublish();
     lastPublish = millis();
 
-    bool          monitoringActive = true;   // starts ON
-    bool          lastButtonState  = HIGH;
-    unsigned long lastButtonPress  = 0;
-    #define DEBOUNCE_MS  300
-
-    Serial.printf("\nReading every %lu seconds. Monitoring: %s\n\n",
-                  INTERVAL_MS / 1000, fruitLabel.c_str());
+    Serial.printf("\nReading every %lu seconds. Monitoring: autonomous (backend-fed)\n\n",
+                  INTERVAL_MS / 1000);
 }
 
 void publishStatus(const char* status) {
