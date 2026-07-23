@@ -311,24 +311,6 @@ function renderSystemStatus(status) {
     }
 }
 
-// ── main refresh ───────────────────────────────────────────
-async function refresh() {
-    const [summary, inventory, preds, alerts] = await Promise.all([
-        api('/api/inventory/summary'),
-        api('/api/inventory'),
-        api('/api/predictions?limit=24'),
-        api('/api/alerts?limit=8'),
-    ]);
-
-    if (summary)   renderStats(summary);
-    if (inventory) renderInventory(inventory);
-    if (preds)     renderCharts(preds);
-    if (alerts)    renderAlerts(alerts);
-
-    document.getElementById('last-updated').textContent =
-        'Updated ' + new Date().toLocaleTimeString();
-    ticker = 15;
-}
 
 // ── stats ──────────────────────────────────────────────────
 function renderStats(s) {
