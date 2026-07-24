@@ -7,7 +7,7 @@ import asyncio
 import json
 import logging
 import ssl
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx
 import paho.mqtt.client as mqtt
@@ -300,9 +300,10 @@ class MQTTClient:
             detected_fruit_type, _ = _parse_ml_label(result["ml_label"])
             if detected_fruit_type != box["fruit_type"]:
                 logger.info(
-                    "Detector/classifier disagree: detector=%s classifier=%s — using classifier",
+                    "Detector/classifier disagree on type (detector=%s, classifier=%s) — discarding, not guessing",
                     box["fruit_type"], detected_fruit_type,
                 )
+                continue   # neither side wins — skip this box entirely, same as low confidence
 
             confirmed_detections.append({
                 "fruit_type": detected_fruit_type,
@@ -363,6 +364,8 @@ class MQTTClient:
             logger.error("Prediction publish failed: %s", exc)
 
     async def _upsert_session(self, db, device_id: str, fruit_type: str, freshness: str, result) -> str | None:
+        STALE_SESSION_HOURS = 6  # no reading in this long = treat as abandoned, don't revive it
+
         stmt = sa_select(FruitSession).where(
             and_(
                 FruitSession.device_id  == device_id,
@@ -372,6 +375,15 @@ class MQTTClient:
         )
         row = (await db.execute(stmt)).scalar_one_or_none()
         now = datetime.utcnow()
+
+        # Check staleness BEFORE anything below touches last_seen — otherwise
+        # the comparison is against a timestamp we just overwrote ourselves.
+        if row and (now - row.last_seen) > timedelta(hours=STALE_SESSION_HOURS):
+            logger.info("Closing stale %s session (last seen %s) — starting fresh instead of reviving",
+                        fruit_type, row.last_seen)
+            row.is_active = False
+            row = None
+
         previous_alert_level = row.last_alert_level if row else None
 
         if row:
