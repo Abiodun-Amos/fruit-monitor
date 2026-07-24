@@ -31,7 +31,7 @@ from alerts.notifier import AlertNotifier
 logger = logging.getLogger(__name__)
 
 GAS_ADC_MAX = 4095.0
-MIN_CLASSIFY_CONFIDENCE = 0.70   # per-crop classification confidence floor
+MIN_FRESHNESS_CONFIDENCE = 0.70   # how sure the model must be between fresh vs rotten
 
 _predictor = SpoilagePredictor(
     warning_days=settings.ALERT_DAYS_THRESHOLD,
@@ -146,9 +146,6 @@ class MQTTClient:
         gas_raw        = float(payload["gas_raw"])
         gas_normalised = _normalise_gas(gas_raw)
 
-        # Option A: use every currently-confirmed camera detection. Falls
-        # back to the device's own self-reported label only when the
-        # camera hasn't confirmed anything yet at all (e.g. fresh boot).
         slots = camera_state.get_all()
         if not slots:
             fallback_type, _ = _parse_ml_label(str(payload["ml_label"]))
@@ -247,9 +244,14 @@ class MQTTClient:
 
     async def _handle_camera(self, payload: dict):
         """
-        Downloads the frame, detects EVERY fruit in it, classifies each
-        detected crop independently, and feeds the confirmed set to
-        camera_state — one slot per fruit type, not one shared value.
+        Downloads the frame, detects EVERY fruit in it. Fruit TYPE is
+        taken from the detector — it has proven far more reliable on
+        real camera images than the classifier's own type guess.
+        Freshness comes from the classifier, computed as the TOTAL
+        probability mass across all "fresh*" classes vs all "rotten*"
+        classes, rather than trusting only its single top-1 guess —
+        this keeps the freshness call correct even when the classifier's
+        specific fruit-type guess is wrong.
         """
         image_url = payload.get("image_url")
         if not image_url:
@@ -285,34 +287,46 @@ class MQTTClient:
         confirmed_detections = []
 
         for box in boxes:
+            fruit_type = box["fruit_type"]   # detector is authoritative on type
+
             try:
                 crop_bytes = crop_box(image_bytes, box["box"])
                 result = await loop.run_in_executor(None, classify_image, crop_bytes)
             except Exception as exc:
-                logger.error("Crop classification failed for %s: %s", box["fruit_type"], exc)
+                logger.error("Crop classification failed for %s: %s", fruit_type, exc)
                 continue
 
-            if result["confidence"] < MIN_CLASSIFY_CONFIDENCE:
-                logger.info("Low-confidence crop ignored → %s (%.2f)",
-                            result["ml_label"], result["confidence"])
+            all_scores = result.get("all_scores") or {}
+            if all_scores:
+                fresh_confidence = sum(v for k, v in all_scores.items() if k.startswith("fresh"))
+            else:
+                # Defensive fallback if all_scores is ever missing —
+                # behaves like the old top-1-only check.
+                fresh_confidence = result["confidence"] if is_fresh_label(result["ml_label"]) else (1.0 - result["confidence"])
+
+            is_fresh              = fresh_confidence >= 0.5
+            freshness_confidence  = fresh_confidence if is_fresh else (1.0 - fresh_confidence)
+
+            if freshness_confidence < MIN_FRESHNESS_CONFIDENCE:
+                logger.info("Low-confidence freshness read ignored → %s (%.2f)",
+                            fruit_type, freshness_confidence)
                 continue
 
-            detected_fruit_type, _ = _parse_ml_label(result["ml_label"])
-            if detected_fruit_type != box["fruit_type"]:
-                logger.info(
-                    "Detector/classifier disagree on type (detector=%s, classifier=%s) — discarding, not guessing",
-                    box["fruit_type"], detected_fruit_type,
-                )
-                continue   # neither side wins — skip this box entirely, same as low confidence
+            ml_label = f"{'fresh' if is_fresh else 'rotten'}{fruit_type}"
+
+            logger.info(
+                "Detector: %s | Classifier top guess: %s | Freshness verdict: %s (%.2f)",
+                fruit_type, result["ml_label"], "fresh" if is_fresh else "rotten", freshness_confidence,
+            )
 
             confirmed_detections.append({
-                "fruit_type": detected_fruit_type,
-                "ml_label":   result["ml_label"],
-                "confidence": result["confidence"],
+                "fruit_type": fruit_type,
+                "ml_label":   ml_label,
+                "confidence": round(freshness_confidence, 4),
             })
 
         if not confirmed_detections:
-            logger.info("All detections fell below classification confidence — nothing confirmed")
+            logger.info("All detections fell below freshness confidence — nothing confirmed")
             return
 
         camera_state.update(confirmed_detections)
@@ -364,7 +378,7 @@ class MQTTClient:
             logger.error("Prediction publish failed: %s", exc)
 
     async def _upsert_session(self, db, device_id: str, fruit_type: str, freshness: str, result) -> str | None:
-        STALE_SESSION_HOURS = 6  # no reading in this long = treat as abandoned, don't revive it
+        STALE_SESSION_HOURS = 6
 
         stmt = sa_select(FruitSession).where(
             and_(
@@ -376,8 +390,6 @@ class MQTTClient:
         row = (await db.execute(stmt)).scalar_one_or_none()
         now = datetime.utcnow()
 
-        # Check staleness BEFORE anything below touches last_seen — otherwise
-        # the comparison is against a timestamp we just overwrote ourselves.
         if row and (now - row.last_seen) > timedelta(hours=STALE_SESSION_HOURS):
             logger.info("Closing stale %s session (last seen %s) — starting fresh instead of reviving",
                         fruit_type, row.last_seen)
