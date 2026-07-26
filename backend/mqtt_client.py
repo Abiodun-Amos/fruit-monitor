@@ -242,130 +242,129 @@ class MQTTClient:
                 days_remaining = result.days_remaining,
             )
 
-async def _handle_camera(self, payload: dict):
-    """
-    Downloads the frame, detects EVERY fruit in it. A box is only
-    accepted when the DETECTOR's type guess and the CLASSIFIER's own
-    type guess genuinely agree — either model alone has now been shown
-    to be confidently wrong on its own, so agreement between them is
-    the safety check, not a single model's authority.
+    async def _handle_camera(self, payload: dict):
+        """
+        Downloads the frame, detects EVERY fruit in it. A box is only
+        accepted when the DETECTOR's type guess and the CLASSIFIER's own
+        type guess genuinely agree — either model alone has been shown
+        to be confidently wrong on its own, so agreement between them is
+        the safety check, not a single model's authority.
 
-    Freshness is computed as the TOTAL probability mass across all
-    "fresh*" classes vs all "rotten*" classes, rather than the
-    classifier's single top-1 guess — this stays robust to minor
-    per-class noise once type agreement has already been confirmed.
-    """
-    image_url = payload.get("image_url")
-    if not image_url:
-        logger.warning("Camera message missing image_url: %s", payload)
-        return
+        Freshness is computed as the TOTAL probability mass across all
+        "fresh*" classes vs all "rotten*" classes, rather than the
+        classifier's single top-1 guess.
+        """
+        image_url = payload.get("image_url")
+        if not image_url:
+            logger.warning("Camera message missing image_url: %s", payload)
+            return
 
-    logger.info("Camera image received: %s", image_url)
-
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.get(image_url)
-            resp.raise_for_status()
-            image_bytes = resp.content
-    except Exception as exc:
-        logger.error("Failed to download camera image: %s", exc)
-        return
-
-    loop = asyncio.get_running_loop()
-
-    try:
-        boxes = await loop.run_in_executor(None, detect_fruits, image_bytes)
-    except Exception as exc:
-        logger.error("Fruit detection failed: %s", exc)
-        return
-
-    if not boxes:
-        logger.info("No fruit detected in frame")
-        return
-
-    logger.info("Detector found %d fruit(s) in frame", len(boxes))
-
-    device_id = payload.get("device_id", "esp32-cam-01")
-    confirmed_detections = []
-
-    for box in boxes:
-        fruit_type = box["fruit_type"]
+        logger.info("Camera image received: %s", image_url)
 
         try:
-            crop_bytes = crop_box(image_bytes, box["box"])
-            result = await loop.run_in_executor(None, classify_image, crop_bytes)
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.get(image_url)
+                resp.raise_for_status()
+                image_bytes = resp.content
         except Exception as exc:
-            logger.error("Crop classification failed for %s: %s", fruit_type, exc)
-            continue
+            logger.error("Failed to download camera image: %s", exc)
+            return
 
-        classifier_fruit_type, _ = _parse_ml_label(result["ml_label"])
-        if classifier_fruit_type != fruit_type:
-            logger.info(
-                "Detector/classifier disagree on type (detector=%s, classifier=%s) — discarding, not guessing",
-                fruit_type, classifier_fruit_type,
-            )
-            continue
+        loop = asyncio.get_running_loop()
 
-        all_scores = result.get("all_scores") or {}
-        if all_scores:
-            fresh_confidence = sum(v for k, v in all_scores.items() if k.startswith("fresh"))
-        else:
-            fresh_confidence = result["confidence"] if is_fresh_label(result["ml_label"]) else (1.0 - result["confidence"])
-
-        is_fresh              = fresh_confidence >= 0.5
-        freshness_confidence  = fresh_confidence if is_fresh else (1.0 - fresh_confidence)
-
-        if freshness_confidence < MIN_FRESHNESS_CONFIDENCE:
-            logger.info("Low-confidence freshness read ignored → %s (%.2f)",
-                        fruit_type, freshness_confidence)
-            continue
-
-        ml_label = f"{'fresh' if is_fresh else 'rotten'}{fruit_type}"
-
-        logger.info(
-            "Detector+Classifier agree: %s | Freshness verdict: %s (%.2f)",
-            fruit_type, "fresh" if is_fresh else "rotten", freshness_confidence,
-        )
-
-        confirmed_detections.append({
-            "fruit_type": fruit_type,
-            "ml_label":   ml_label,
-            "confidence": round(freshness_confidence, 4),
-        })
-
-    if not confirmed_detections:
-        logger.info("All detections discarded (type disagreement or low confidence) — nothing confirmed")
-        return
-
-    camera_state.update(confirmed_detections)
-    logger.info("Camera state updated: %s",
-                ", ".join(d["ml_label"] for d in confirmed_detections))
-
-    async with AsyncSessionLocal() as db:
         try:
-            for det in confirmed_detections:
-                stmt = sa_select(CameraLastLabel).where(
-                    and_(
-                        CameraLastLabel.device_id  == device_id,
-                        CameraLastLabel.fruit_type == det["fruit_type"],
-                    )
+            boxes = await loop.run_in_executor(None, detect_fruits, image_bytes)
+        except Exception as exc:
+            logger.error("Fruit detection failed: %s", exc)
+            return
+
+        if not boxes:
+            logger.info("No fruit detected in frame")
+            return
+
+        logger.info("Detector found %d fruit(s) in frame", len(boxes))
+
+        device_id = payload.get("device_id", "esp32-cam-01")
+        confirmed_detections = []
+
+        for box in boxes:
+            fruit_type = box["fruit_type"]
+
+            try:
+                crop_bytes = crop_box(image_bytes, box["box"])
+                result = await loop.run_in_executor(None, classify_image, crop_bytes)
+            except Exception as exc:
+                logger.error("Crop classification failed for %s: %s", fruit_type, exc)
+                continue
+
+            classifier_fruit_type, _ = _parse_ml_label(result["ml_label"])
+            if classifier_fruit_type != fruit_type:
+                logger.info(
+                    "Detector/classifier disagree on type (detector=%s, classifier=%s) — discarding, not guessing",
+                    fruit_type, classifier_fruit_type,
                 )
-                row = (await db.execute(stmt)).scalar_one_or_none()
-                if row:
-                    row.ml_label   = det["ml_label"]
-                    row.confidence = det["confidence"]
-                    row.updated_at = datetime.utcnow()
-                else:
-                    db.add(CameraLastLabel(
-                        device_id  = device_id,
-                        fruit_type = det["fruit_type"],
-                        ml_label   = det["ml_label"],
-                        confidence = det["confidence"],
-                    ))
-            await db.commit()
-        except Exception as exc:
-            await db.rollback()
-            logger.error("Failed to persist camera labels: %s", exc)
+                continue
+
+            all_scores = result.get("all_scores") or {}
+            if all_scores:
+                fresh_confidence = sum(v for k, v in all_scores.items() if k.startswith("fresh"))
+            else:
+                fresh_confidence = result["confidence"] if is_fresh_label(result["ml_label"]) else (1.0 - result["confidence"])
+
+            is_fresh              = fresh_confidence >= 0.5
+            freshness_confidence  = fresh_confidence if is_fresh else (1.0 - fresh_confidence)
+
+            if freshness_confidence < MIN_FRESHNESS_CONFIDENCE:
+                logger.info("Low-confidence freshness read ignored → %s (%.2f)",
+                            fruit_type, freshness_confidence)
+                continue
+
+            ml_label = f"{'fresh' if is_fresh else 'rotten'}{fruit_type}"
+
+            logger.info(
+                "Detector+Classifier agree: %s | Freshness verdict: %s (%.2f)",
+                fruit_type, "fresh" if is_fresh else "rotten", freshness_confidence,
+            )
+
+            confirmed_detections.append({
+                "fruit_type": fruit_type,
+                "ml_label":   ml_label,
+                "confidence": round(freshness_confidence, 4),
+            })
+
+        if not confirmed_detections:
+            logger.info("All detections discarded (type disagreement or low confidence) — nothing confirmed")
+            return
+
+        camera_state.update(confirmed_detections)
+        logger.info("Camera state updated: %s",
+                    ", ".join(d["ml_label"] for d in confirmed_detections))
+
+        async with AsyncSessionLocal() as db:
+            try:
+                for det in confirmed_detections:
+                    stmt = sa_select(CameraLastLabel).where(
+                        and_(
+                            CameraLastLabel.device_id  == device_id,
+                            CameraLastLabel.fruit_type == det["fruit_type"],
+                        )
+                    )
+                    row = (await db.execute(stmt)).scalar_one_or_none()
+                    if row:
+                        row.ml_label   = det["ml_label"]
+                        row.confidence = det["confidence"]
+                        row.updated_at = datetime.utcnow()
+                    else:
+                        db.add(CameraLastLabel(
+                            device_id  = device_id,
+                            fruit_type = det["fruit_type"],
+                            ml_label   = det["ml_label"],
+                            confidence = det["confidence"],
+                        ))
+                await db.commit()
+            except Exception as exc:
+                await db.rollback()
+                logger.error("Failed to persist camera labels: %s", exc)
 
     def _handle_status(self, payload: dict):
         device_id = payload.get("device_id", "unknown")
