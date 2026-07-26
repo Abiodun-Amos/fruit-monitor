@@ -112,4 +112,29 @@ async def infer_multi(file: UploadFile = File(...)):
     except Exception as exc:
         return {"error": str(exc)}
 
+@app.post("/api/infer-multi-debug", tags=["Inference"])
+async def infer_multi_debug(file: UploadFile = File(...)):
+    """Same as infer-multi, but returns the actual cropped images (base64)
+    so you can SEE what the classifier received for each box."""
+    import base64
+    from .detector import detect_fruits, crop_box
+    from .inference import classify_image
+    image_bytes = await file.read()
+    try:
+        boxes = detect_fruits(image_bytes)
+        results = []
+        for box in boxes:
+            crop = crop_box(image_bytes, box["box"])
+            classified = classify_image(crop)
+            results.append({
+                "detector_said":   box["fruit_type"],
+                "classifier_said": classified["ml_label"],
+                "confidence":      classified["confidence"],
+                "box_pixels":      box["box"],
+                "crop_base64":     base64.b64encode(crop).decode("utf-8"),
+            })
+        return {"fruit_count": len(boxes), "results": results}
+    except Exception as exc:
+        return {"error": str(exc)}
+
 app.mount("/dashboard", StaticFiles(directory="dashboard", html=True), name="dashboard")
