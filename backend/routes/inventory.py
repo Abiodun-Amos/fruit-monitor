@@ -15,6 +15,15 @@ from ..device_state import device_state
 
 router = APIRouter()
 
+# A session is "active" if seen within this window. Kept short because the
+# camera captures every 30s-1min — this allows for one or two missed
+# cycles before treating a fruit as no longer physically present, rather
+# than the old 10-minute window which let stale entries linger far past
+# when the camera had actually stopped confirming them.
+ACTIVE_WINDOW_MINUTES = 2
+
+ONLINE_WINDOW_SECONDS = 90  # no reading in this window = device offline
+
 
 def _to_dict(s: FruitSession) -> dict:
     now              = datetime.utcnow()
@@ -39,13 +48,34 @@ def _to_dict(s: FruitSession) -> dict:
     }
 
 
+async def _close_stale_sessions(db: AsyncSession, cutoff: datetime) -> None:
+    """
+    Formally closes any session the camera hasn't reconfirmed since the
+    cutoff — not just hides it from one query's results, actually flips
+    is_active so it stops counting as 'in storage' everywhere. Shared by
+    both routes below so they can never disagree with each other.
+    """
+    stmt = (
+        select(FruitSession)
+        .where(FruitSession.is_active == True)   # noqa: E712
+        .where(FruitSession.last_seen < cutoff)
+    )
+    stale_rows = (await db.execute(stmt)).scalars().all()
+    for row in stale_rows:
+        row.is_active = False
+    if stale_rows:
+        await db.commit()
+
+
 @router.get("/")
 async def get_inventory(db: AsyncSession = Depends(get_db)):
     """Fruits currently in storage (seen within the active window)."""
     cutoff = datetime.utcnow() - timedelta(minutes=ACTIVE_WINDOW_MINUTES)
+    await _close_stale_sessions(db, cutoff)
+
     stmt = (
         select(FruitSession)
-        .where(FruitSession.is_active == True)      # noqa: E712
+        .where(FruitSession.is_active == True)   # noqa: E712
         .where(FruitSession.last_seen >= cutoff)
         .order_by(FruitSession.first_seen)
     )
@@ -53,18 +83,16 @@ async def get_inventory(db: AsyncSession = Depends(get_db)):
     return [_to_dict(r) for r in rows]
 
 
-# A session is "active" if seen within this window
-ACTIVE_WINDOW_MINUTES = 10
-
-
 @router.get("/summary")
 async def inventory_summary(db: AsyncSession = Depends(get_db)):
     """Count of fruits seen recently (currently active), by alert level."""
     cutoff = datetime.utcnow() - timedelta(minutes=ACTIVE_WINDOW_MINUTES)
+    await _close_stale_sessions(db, cutoff)
+
     stmt = (
         select(FruitSession.last_alert_level, func.count(FruitSession.id))
-        .where(FruitSession.is_active == True)          # noqa: E712
-        .where(FruitSession.last_seen >= cutoff)         # only recently seen
+        .where(FruitSession.is_active == True)   # noqa: E712
+        .where(FruitSession.last_seen >= cutoff)
         .group_by(FruitSession.last_alert_level)
     )
     rows   = (await db.execute(stmt)).all()
@@ -93,12 +121,12 @@ async def remove_fruit(session_id: int, db: AsyncSession = Depends(get_db)):
     await db.commit()
     return {"id": session_id, "fruit_type": row.fruit_type, "removed": True}
 
+
 @router.get("/device-status")
 async def get_device_status():
     """Latest paused/resumed status per device."""
     return device_state.get_all()
 
-ONLINE_WINDOW_SECONDS = 90  # no reading in this window = offline
 
 @router.get("/system-status")
 async def system_status(db: AsyncSession = Depends(get_db)):
@@ -108,7 +136,6 @@ async def system_status(db: AsyncSession = Depends(get_db)):
     online = False
     if last_seen:
         now = datetime.utcnow()
-        # Guard against tz-aware vs naive datetime mismatches from the driver
         last_seen_naive = last_seen.replace(tzinfo=None) if last_seen.tzinfo else last_seen
         online = (now - last_seen_naive).total_seconds() <= ONLINE_WINDOW_SECONDS
 
