@@ -67,17 +67,20 @@ def classify_image(image_bytes: bytes) -> dict:
     img = img.resize(IMG_SIZE)
     arr = np.asarray(img)
 
-    # Match the model's expected input dtype (INT8 quantized)
+    # Match the model's expected input dtype (INT8 or UINT8 quantized)
     in_dtype = _input_details[0]["dtype"]
-    if in_dtype == np.uint8 or in_dtype == np.int8:
-        # Quantized model expects raw 0-255 (or int8) pixels
-        scale, zero_point = _input_details[0]["quantization"]
-        if scale == 0:
-            data = arr.astype(in_dtype)
-        else:
-            data = (arr / scale + zero_point).astype(in_dtype)
+    if in_dtype == np.uint8:
+        # For UINT8 quantized models the input is expected to be raw 0‑255 uint8 values.
+        # No scaling is required – just cast the numpy array.
+        data = arr.astype(np.uint8)
+    elif in_dtype == np.int8:
+        # INT8 quantized models use a zero‑point offset. Apply the offset without scaling.
+        # The model's quantization parameters are (scale, zero_point). For image data
+        # the scale is typically 1.0, so we only need to add the zero_point.
+        _, zero_point = _input_details[0]["quantization"]
+        data = (arr + zero_point).astype(np.int8)
     else:
-        # Float model expects normalised 0-1
+        # Float model expects normalised 0‑1 values.
         data = (arr.astype(np.float32) / 255.0)
 
     data = np.expand_dims(data, axis=0)
